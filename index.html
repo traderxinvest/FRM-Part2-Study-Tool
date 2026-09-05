@@ -1,0 +1,1918 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FRM Part II 備考複習系統 | FRM Part II Study System</title>
+
+<!-- ============ CDN 依賴 ============ -->
+<!-- Tailwind CSS (Play CDN) -->
+<script src="https://cdn.tailwindcss.com"></script>
+<script>tailwind.config = { darkMode: 'class' };</script>
+<!-- KaTeX 公式渲染 -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+<!-- D3.js v7 知識圖譜 -->
+<!-- html2pdf.js 匯出PDF -->
+<!-- TypeScript 編譯器（將 script 標籤內的 TypeScript 即時編譯為 JS 執行） -->
+
+<style>
+  /* ===== 全域自訂樣式 ===== */
+  html { scroll-behavior: smooth; }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-thumb { background: #94a3b8; border-radius: 4px; }
+  .dark ::-webkit-scrollbar-thumb { background: #475569; }
+  /* 閃卡 3D 翻轉 */
+  .fc-scene { perspective: 1400px; }
+  .fc-card { position: relative; transform-style: preserve-3d; transition: transform .55s cubic-bezier(.2,.7,.3,1); }
+  .fc-card.flipped { transform: rotateY(180deg); }
+  .fc-face { backface-visibility: hidden; -webkit-backface-visibility: hidden; position: absolute; inset: 0; overflow-y: auto; }
+  .fc-back { transform: rotateY(180deg); }
+  /* KaTeX 字號微調 */
+  .katex { font-size: 1.05em; }
+  /* 圖譜節點 */
+  .gnode { cursor: pointer; }
+  .gnode text { pointer-events: none; user-select: none; }
+  /* 卡片 hover */
+  .card-hover { transition: transform .15s ease, box-shadow .15s ease; }
+  .card-hover:hover { transform: translateY(-2px); box-shadow: 0 10px 24px -12px rgba(15,23,42,.25); }
+  /* PDF 匯出容器（不顯示於畫面） */
+  #pdf-root { position: fixed; left: -10000px; top: 0; width: 794px; background: #ffffff; color: #0f172a; }
+  /* 閃卡翻轉提示 */
+  .fc-hint { animation: pulse 2s infinite; }
+  @keyframes pulse { 0%,100%{opacity:.55} 50%{opacity:1} }
+</style>
+</head>
+
+<body class="bg-slate-100 dark:bg-slate-950 text-slate-800 dark:text-slate-200 min-h-screen">
+
+<!-- 頂部導航欄（由 TS 渲染） -->
+<header id="topnav" class="sticky top-0 z-40"></header>
+
+<!-- 主內容區 -->
+<main id="app" class="max-w-[1400px] mx-auto px-3 sm:px-5 py-5 min-h-[calc(100vh-64px)]"></main>
+
+<!-- 彈窗層 -->
+<div id="modal-root"></div>
+<!-- 提示訊息層 -->
+<div id="toast-root" class="fixed bottom-5 right-5 z-[90] space-y-2"></div>
+<!-- PDF 匯出容器（離屏） -->
+<div id="pdf-root"></div>
+<!-- 資料載入/設定覆蓋層 -->
+<div id="setup-root" class="fixed inset-0 z-[80] hidden"></div>
+
+<!-- ===== 依賴庫（順序載入） ===== -->
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+<script src="https://cdn.jsdelivr.net/npm/html2pdf.js@0.10.1/dist/html2pdf.bundle.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/typescript@5.4.5/lib/typescript.min.js"></script>
+
+<!-- ================================================================
+     應用主程式（TypeScript）
+     說明：本段為 TypeScript 原始碼，由頁尾的引導腳本即時編譯執行。
+     個人數據全部存放 LocalStorage，與業務 JSON 完全分離。
+================================================================ -->
+<script type="text/typescript" id="ts-app">
+/* ================= 外部全域宣告（CDN 庫） ================= */
+declare const d3: any;
+declare const renderMathInElement: any;
+declare const html2pdf: any;
+
+/* ================= 業務數據型別（對應兩個 JSON 檔案結構） ================= */
+interface Concept {
+  conceptId: string; title: string; titleEn: string;
+  explanation: string; explanationEn: string;
+  relatedFormulaIds: string[]; relatedQuestionIds: string[];
+  tags: string[]; tagsEn: string[];
+}
+interface Formula {
+  formulaId: string; name: string; nameEn: string;
+  latex: string; description: string; descriptionEn: string;
+  relatedConceptIds: string[];
+}
+interface Chapter {
+  chapterId: string; chapterName: string; chapterNameEn: string;
+  summary: string; summaryEn: string;
+  concepts: Concept[]; formulas: Formula[];
+}
+interface KB { chapters: Chapter[]; }
+interface Question {
+  questionId: string; chapterId: string;
+  questionText: string; questionTextEn: string;
+  options: Record<string, string>; optionsEn: Record<string, string>;
+  correctAnswer: string;
+  explanation: string; explanationEn: string;
+  relatedConceptIds: string[]; relatedFormulaIds: string[];
+  difficulty: 'easy' | 'medium' | 'hard';
+  tags: string[]; tagsEn: string[];
+}
+interface QB { questions: Question[]; }
+
+/* ================= 個人數據型別（LocalStorage） ================= */
+type Mastery = 'mastered' | 'review' | 'unmastered';          // 掌握狀態
+type FCRating = 'remember' | 'fuzzy' | 'forgot';              // 閃卡評分
+type Lang = 'zh' | 'en';
+
+interface FCHistoryItem { last: number; lastRating: FCRating; remember: number; fuzzy: number; forgot: number; total: number; }
+interface WrongItem { t: number; n: number; }
+interface QLogItem { c: number; w: number; t: number; }        // 做題記錄：正確/錯誤次數
+
+/* ================= LocalStorage 鍵值（個人數據與快取，獨立於 JSON） ================= */
+const K = {
+  lang: 'frm2_v1_lang',            // 介面語言
+  theme: 'frm2_v1_theme',          // 深淺色主題
+  mastery: 'frm2_v1_master',       // 知識點/公式掌握標記 { id: Mastery }
+  flash: 'frm2_v1_fc',             // 閃卡複習歷史 { id: FCHistoryItem }
+  wrong: 'frm2_v1_wrong',          // 錯題本 { qid: WrongItem }
+  qlog: 'frm2_v1_qlog',            // 做題記錄 { qid: QLogItem }
+  kb: 'frm2_v1_kb_cache',          // knowledge_base.json 快取
+  qb: 'frm2_v1_qb_cache',          // question_bank.json 快取
+};
+
+/* ================= 基礎工具 ================= */
+function lsGet<T>(key: string, def: T): T {
+  try { const v = localStorage.getItem(key); return v ? JSON.parse(v) as T : def; }
+  catch { return def; }
+}
+function lsSet(key: string, val: any): void {
+  try { localStorage.setItem(key, JSON.stringify(val)); }
+  catch (e) { toast('LocalStorage 寫入失敗（空間可能不足）', 'error'); }
+}
+function esc(s: any): string {   // HTML 轉義，防止內容破壞排版
+  return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function now(): number { return Date.now(); }
+function fmtTime(sec: number): string {
+  const m = Math.floor(sec / 60), s = sec % 60;
+  return `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+}
+function shuffle<T>(arr: T[]): T[] {
+  const a = arr.slice();
+  for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
+  return a;
+}
+
+/* ================= 提示訊息 Toast ================= */
+function toast(msg: string, kind: 'ok'|'error'|'info' = 'ok'): void {
+  const root = document.getElementById('toast-root')!;
+  const color = kind === 'ok' ? 'bg-emerald-600' : kind === 'error' ? 'bg-rose-600' : 'bg-sky-600';
+  const el = document.createElement('div');
+  el.className = `${color} text-white text-sm px-4 py-2.5 rounded-lg shadow-lg max-w-xs break-words`;
+  el.textContent = msg;
+  root.appendChild(el);
+  setTimeout(() => { el.style.opacity = '0'; el.style.transition = 'opacity .4s'; setTimeout(() => el.remove(), 400); }, 2600);
+}
+
+/* ================= 全域狀態 ================= */
+let LANG: Lang = lsGet<Lang>(K.lang, 'zh');
+let THEME: 'light' | 'dark' = lsGet<'light'|'dark'>(K.theme, 'light');
+let KB: KB | null = null;            // 知識庫數據
+let QB: QB | null = null;            // 題庫數據
+let READY = false;                   // 數據是否就緒
+
+// 索引 Map（數據載入後重建）
+let CH: Map<string, Chapter> = new Map();
+let CP: Map<string, Concept> = new Map();
+let FM: Map<string, Formula> = new Map();
+let QS: Map<string, Question> = new Map();
+
+function rebuildIndex(): void {
+  CH = new Map(); CP = new Map(); FM = new Map(); QS = new Map();
+  (KB?.chapters || []).forEach(c => {
+    CH.set(c.chapterId, c);
+    (c.concepts || []).forEach(x => CP.set(x.conceptId, x));
+    (c.formulas || []).forEach(x => FM.set(x.formulaId, x));
+  });
+  (QB?.questions || []).forEach(q => QS.set(q.questionId, q));
+}
+
+/* ================= 個人數據存取層（LocalStorage） ================= */
+const MasteryStore = {
+  all(): Record<string, Mastery> { return lsGet(K.mastery, {}); },
+  get(id: string): Mastery { return this.all()[id] || 'unmastered'; },
+  set(id: string, m: Mastery): void { const a = this.all(); a[id] = m; lsSet(K.mastery, a); },
+};
+const FlashStore = {
+  all(): Record<string, FCHistoryItem> { return lsGet(K.flash, {}); },
+  rate(id: string, r: FCRating): void {
+    const a = this.all();
+    const it: FCHistoryItem = a[id] || { last: 0, lastRating: r, remember: 0, fuzzy: 0, forgot: 0, total: 0 };
+    it.last = now(); it.lastRating = r; it.total++;
+    if (r === 'remember') it.remember++; else if (r === 'fuzzy') it.fuzzy++; else it.forgot++;
+    a[id] = it; lsSet(K.flash, a);
+  },
+};
+const WrongStore = {
+  all(): Record<string, WrongItem> { return lsGet(K.wrong, {}); },
+  add(qid: string): void {
+    const a = this.all();
+    a[qid] = { t: now(), n: (a[qid]?.n || 0) + 1 }; lsSet(K.wrong, a);
+  },
+  remove(qid: string): void { const a = this.all(); delete a[qid]; lsSet(K.wrong, a); },
+  has(qid: string): boolean { return !!this.all()[qid]; },
+  count(): number { return Object.keys(this.all()).length; },
+};
+const QLogStore = {
+  all(): Record<string, QLogItem> { return lsGet(K.qlog, {}); },
+  record(qid: string, correct: boolean): void {
+    const a = this.all();
+    const it: QLogItem = a[qid] || { c: 0, w: 0, t: 0 };
+    if (correct) it.c++; else it.w++;
+    it.t = now(); a[qid] = it; lsSet(K.qlog, a);
+  },
+  totalDone(): number { return Object.values(this.all()).reduce((s, x) => s + x.c + x.w, 0); },
+  totalCorrect(): number { return Object.values(this.all()).reduce((s, x) => s + x.c, 0); },
+};
+
+/* ================= 多語言（介面文案） ================= */
+const I18N: Record<string, { zh: string; en: string }> = {
+  nav_kb:      { zh: '知識庫', en: 'Knowledge' },
+  nav_fm:      { zh: '公式', en: 'Formulas' },
+  nav_fc:      { zh: '閃卡Anki', en: 'Flashcards' },
+  nav_graph:   { zh: '知識圖譜', en: 'Graph' },
+  nav_quiz:    { zh: '題庫考試', en: 'Quiz & Exam' },
+  nav_wrong:   { zh: '錯題本', en: 'Wrong Book' },
+  nav_stats:   { zh: '學習統計', en: 'Statistics' },
+  mastered:    { zh: '已掌握', en: 'Mastered' },
+  review:      { zh: '待複習', en: 'To Review' },
+  unmastered:  { zh: '未掌握', en: 'Not Yet' },
+  all:         { zh: '全部', en: 'All' },
+  concept:     { zh: '概念', en: 'Concept' },
+  formula:     { zh: '公式', en: 'Formula' },
+  question:    { zh: '題目', en: 'Question' },
+  chapter:     { zh: '章節', en: 'Chapter' },
+  difficulty:  { zh: '難度', en: 'Difficulty' },
+  easy:        { zh: '簡單', en: 'Easy' },
+  medium:      { zh: '中等', en: 'Medium' },
+  hard:        { zh: '困難', en: 'Hard' },
+  tags:        { zh: '標籤', en: 'Tags' },
+  relatedQ:    { zh: '關聯題目', en: 'Related Questions' },
+  relatedC:    { zh: '關聯概念', en: 'Related Concepts' },
+  relatedF:    { zh: '關聯公式', en: 'Related Formulas' },
+  mark_master: { zh: '標記掌握狀態', en: 'Set Mastery' },
+  correct:     { zh: '正確答案', en: 'Correct Answer' },
+  yourAns:     { zh: '你的答案', en: 'Your Answer' },
+  explanation: { zh: '解析', en: 'Explanation' },
+  practice:    { zh: '練習模式', en: 'Practice' },
+  exam:        { zh: '模擬考試', en: 'Mock Exam' },
+  start:       { zh: '開始', en: 'Start' },
+  next:        { zh: '下一題', en: 'Next' },
+  prev:        { zh: '上一題', en: 'Prev' },
+  submit:      { zh: '交卷', en: 'Submit' },
+  questionCount: { zh: '題量', en: 'Questions' },
+  minutes:     { zh: '考試時長（分鐘）', en: 'Duration (min)' },
+  timer:       { zh: '剩餘時間', en: 'Time Left' },
+  flag:        { zh: '標記本題', en: 'Flag' },
+  answerSheet: { zh: '答題卡', en: 'Answer Sheet' },
+  scoreReport: { zh: '考試報告', en: 'Exam Report' },
+  score:       { zh: '得分', en: 'Score' },
+  accuracy:    { zh: '正確率', en: 'Accuracy' },
+  doneCount:   { zh: '總做題', en: 'Answered' },
+  wrongCount:  { zh: '錯題數', en: 'Wrong' },
+  fav:         { zh: '收藏錯題', en: 'Save to Wrong' },
+  favDone:     { zh: '已收藏', en: 'Saved' },
+  redoWrong:   { zh: '刷錯題', en: 'Redo Wrong' },
+  removeWrong: { zh: '移出錯題本', en: 'Remove' },
+  exportMD:    { zh: '匯出 Markdown', en: 'Export Markdown' },
+  exportPDF:   { zh: '匯出 PDF', en: 'Export PDF' },
+  emptyWrong:  { zh: '錯題本是空的，快去題庫練習吧！', en: 'Wrong book is empty — go practice!' },
+  fc_flip:     { zh: '點擊卡片翻面', en: 'Tap card to flip' },
+  fc_remember: { zh: '記住', en: 'Remember' },
+  fc_fuzzy:    { zh: '模糊', en: 'Fuzzy' },
+  fc_forget:   { zh: '忘記', en: 'Forgot' },
+  fc_scope:    { zh: '抽卡範圍', en: 'Card Scope' },
+  fc_all:      { zh: '全部知識點', en: 'All items' },
+  fc_weak:     { zh: '僅未掌握+待複習', en: 'Weak only' },
+  fc_type:     { zh: '卡片類型', en: 'Card Type' },
+  fc_next:     { zh: '下一張', en: 'Next Card' },
+  fc_skip:     { zh: '跳過', en: 'Skip' },
+  fc_remaining:{ zh: '本輪剩餘', en: 'Remaining' },
+  fc_today:    { zh: '本次統計', en: 'Session' },
+  graph_hint:  { zh: '滾輪縮放 · 拖拽節點/畫布 · 點擊節點查看詳情', en: 'Scroll to zoom · drag nodes/canvas · click for details' },
+  graph_legend:{ zh: '圖例', en: 'Legend' },
+  filter_status: { zh: '掌握狀態', en: 'Mastery' },
+  filter_chapter:{ zh: '章節篩選', en: 'Chapter Filter' },
+  no_data:     { zh: '暫無數據', en: 'No data' },
+  stats_kp:    { zh: '知識點掌握度', en: 'Mastery Overview' },
+  stats_q:     { zh: '做題統計', en: 'Question Stats' },
+  stats_by_ch: { zh: '分章統計', en: 'By Chapter' },
+  kp_total:    { zh: '知識點總數', en: 'Total Items' },
+  fc_total:    { zh: '閃卡複習次數', en: 'Flash Reviews' },
+  filter_list: { zh: '按掌握狀態過濾知識庫', en: 'Filter Knowledge by Mastery' },
+  update_json: { zh: '更新資料', en: 'Update Data' },
+  help:        { zh: '使用說明', en: 'Help' },
+  lang_btn:    { zh: 'EN', en: '中' },
+  data_load_fail: { zh: '讀取本地JSON失敗，請在下方選擇兩個JSON檔案（首次選擇後會快取，之後雙擊即可打開）', en: 'Failed to load local JSON. Please pick the two JSON files below (they will be cached for offline use).' },
+  pick_kb:     { zh: '選擇 knowledge_base.json', en: 'Pick knowledge_base.json' },
+  pick_qb:     { zh: '選擇 question_bank.json', en: 'Pick question_bank.json' },
+  load_ok:     { zh: '資料載入成功！', en: 'Data loaded!' },
+  kb_bad:      { zh: 'knowledge_base.json 格式不正確', en: 'Invalid knowledge_base.json' },
+  qb_bad:      { zh: 'question_bank.json 格式不正確', en: 'Invalid question_bank.json' },
+  both_needed: { zh: '請同時載入兩個檔案', en: 'Please load both files' },
+  exam_timeup: { zh: '時間到，自動交卷！', en: "Time's up — auto submitted!" },
+  confirm_submit:{ zh: '確認交卷？未答題目將計為錯誤。', en: 'Submit now? Unanswered questions count as wrong.' },
+  back:        { zh: '返回', en: 'Back' },
+  close:       { zh: '關閉', en: 'Close' },
+  summary:     { zh: '章節概覽', en: 'Chapter Summary' },
+  concepts_n:  { zh: '個概念', en: 'concepts' },
+  formulas_n:  { zh: '個公式', en: 'formulas' },
+  questions_n: { zh: '道關聯題', en: 'questions' },
+  laTeX_err:   { zh: '（公式渲染失敗，已顯示原始碼）', en: '(LaTeX render failed, showing source)' },
+  exam_review: { zh: '逐題回顧', en: 'Review Answers' },
+  retest:      { zh: '再考一次', en: 'Retake' },
+  openInQuiz:  { zh: '在題庫中練習此題', en: 'Practice this question' },
+  noMatch:     { zh: '沒有符合條件的內容', en: 'No matching items' },
+  fc_empty:    { zh: '當前篩選沒有可刷的卡片', en: 'No cards match the filter' },
+  export_none: { zh: '錯題本為空，無內容可匯出', en: 'Nothing to export' },
+  export_ok:   { zh: '匯出成功', en: 'Exported' },
+  autoRemove:  { zh: '重做正確後自動移出錯題本', en: 'Auto-remove when redo correct' },
+  clearWrong:  { zh: '清空錯題本', en: 'Clear Wrong Book' },
+  confirmClear:{ zh: '確認清空錯題本？此操作不可復原。', en: 'Clear all wrong questions? This cannot be undone.' },
+  redo_done:   { zh: '本輪錯題重做完成！', en: 'Redo round finished!' },
+  redone_ok:   { zh: '本次答對，已從錯題本移除', en: 'Correct — removed from wrong book' },
+  redone_stay: { zh: '仍答錯，保留在錯題本', en: 'Still wrong — kept in wrong book' },
+  help_title:  { zh: '使用說明', en: 'How to Use' },
+};
+function t(key: string): string { const e = I18N[key]; return e ? (LANG === 'zh' ? e.zh : e.en) : key; }
+/** 依當前語言選擇內容欄位 */
+function L<T>(zh: T, en: T): T { return LANG === 'zh' ? zh : en; }
+const chName = (c: Chapter) => L(c.chapterName, c.chapterNameEn);
+const chSummary = (c: Chapter) => L(c.summary, c.summaryEn);
+const cTitle = (c: Concept) => L(c.title, c.titleEn);
+const cExpl = (c: Concept) => L(c.explanation, c.explanationEn);
+const fName = (f: Formula) => L(f.name, f.nameEn);
+const fDesc = (f: Formula) => L(f.description, f.descriptionEn);
+const qText = (q: Question) => L(q.questionText, q.questionTextEn);
+const qOpt = (q: Question, k: string) => L(q.options?.[k] || '', q.optionsEn?.[k] || '');
+const qExpl = (q: Question) => L(q.explanation, q.explanationEn);
+const qTags = (q: Question) => L(q.tags, q.tagsEn);
+const diffLabel = (d: string) => t(d);
+const masteryLabel = (m: Mastery) => t(m);
+
+/* ================= LaTeX 渲染（容錯處理） ================= */
+function renderMath(container: HTMLElement | null): void {
+  if (!container) return;
+  if (typeof renderMathInElement !== 'function') return;   // CDN 未載入時靜默跳過
+  try {
+    renderMathInElement(container, {
+      delimiters: [
+        { left: '$$', right: '$$', display: true },
+        { left: '$', right: '$', display: false },
+        { left: '\\[', right: '\\]', display: true },
+        { left: '\\(', right: '\\)', display: false },
+      ],
+      throwOnError: false,
+      errorColor: '#dc2626',
+      ignoredTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code'],
+    });
+  } catch (e) { console.warn('KaTeX render error', e); }
+}
+
+/* ================= 視圖路由 ================= */
+type ViewKey = 'kb' | 'fm' | 'fc' | 'graph' | 'quiz' | 'wrong' | 'stats';
+const NAV: { key: ViewKey; icon: string }[] = [
+  { key: 'kb', icon: '📚' }, { key: 'fm', icon: '🧮' }, { key: 'fc', icon: '🃏' },
+  { key: 'graph', icon: '🕸️' }, { key: 'quiz', icon: '📝' }, { key: 'wrong', icon: '⭐' },
+  { key: 'stats', icon: '📊' },
+];
+let ACTIVE: ViewKey = 'kb';
+
+function currentHash(): ViewKey {
+  const h = location.hash.replace(/^#\//, '');
+  const k = h.split('?')[0] as ViewKey;
+  return NAV.some(n => n.key === k) ? k : 'kb';
+}
+
+function navigate(v: ViewKey): void {
+  location.hash = '#/' + v;
+}
+
+window.addEventListener('hashchange', () => { ACTIVE = currentHash(); renderApp(); });
+
+/* ================= 彈窗（支持堆疊：概念→題目→公式…） ================= */
+let modalStack: { type: 'concept'|'formula'|'question'|'help'; id: string }[] = [];
+
+function openModal(type: 'concept'|'formula'|'question'|'help', id: string): void {
+  modalStack.push({ type, id });
+  renderModal();
+}
+function closeModal(): void { modalStack.pop(); renderModal(); refreshGraphColors(); }
+function closeAllModals(): void { modalStack = []; renderModal(); refreshGraphColors(); }
+/** 彈窗關閉後，若當前在圖譜視圖則重繪以同步掌握狀態顏色 */
+function refreshGraphColors(): void { if (ACTIVE === 'graph' && READY) { try { buildGraph(); } catch {} } }
+
+function renderModal(): void {
+  const root = document.getElementById('modal-root')!;
+  if (!modalStack.length) { root.innerHTML = ''; return; }
+  const top = modalStack[modalStack.length - 1];
+  let inner = '';
+  if (top.type === 'help') inner = helpModalHTML();
+  else if (top.type === 'concept') inner = conceptDetailHTML(top.id);
+  else if (top.type === 'formula') inner = formulaDetailHTML(top.id);
+  else if (top.type === 'question') inner = questionDetailHTML(top.id);
+  if (!inner) { modalStack.pop(); if (modalStack.length) { renderModal(); } else { root.innerHTML = ''; } return; }
+  root.innerHTML = `
+  <div class="fixed inset-0 z-[70] flex items-start justify-center p-3 sm:p-8 overflow-y-auto bg-slate-900/60 backdrop-blur-sm" data-act="modal-backdrop">
+    <div class="w-full max-w-3xl bg-white dark:bg-slate-900 rounded-2xl shadow-2xl my-4">
+      <div class="flex items-center justify-between px-5 py-3 border-b border-slate-200 dark:border-slate-700 sticky top-0 bg-white dark:bg-slate-900 rounded-t-2xl z-10">
+        <div class="text-xs text-slate-500">${t('back')} / ${t('close')}：ESC 或點擊遮罩</div>
+        <div class="flex items-center gap-2">
+          ${modalStack.length > 1 ? `<button class="px-3 py-1.5 text-sm rounded-lg bg-slate-200 dark:bg-slate-700 hover:opacity-80" data-act="modal-back">← ${t('back')}</button>` : ''}
+          <button class="px-3 py-1.5 text-sm rounded-lg bg-slate-200 dark:bg-slate-700 hover:opacity-80" data-act="modal-close">✕</button>
+        </div>
+      </div>
+      <div class="px-5 py-4">${inner}</div>
+    </div>
+  </div>`;
+  renderMath(root);
+}
+document.addEventListener('keydown', (e: KeyboardEvent) => { if (e.key === 'Escape' && modalStack.length) closeModal(); });
+
+/* ================= 掌握狀態組件 ================= */
+function masteryButtons(id: string): string {
+  const cur = MasteryStore.get(id);
+  const opts: { m: Mastery; color: string; dot: string }[] = [
+    { m: 'mastered', color: 'bg-emerald-500 text-white', dot: '🟢' },
+    { m: 'review', color: 'bg-amber-500 text-white', dot: '🟡' },
+    { m: 'unmastered', color: 'bg-rose-500 text-white', dot: '🔴' },
+  ];
+  return `
+  <div class="flex flex-wrap items-center gap-1.5" data-mastery-group="${esc(id)}">
+    <span class="text-xs text-slate-500 mr-1">${t('mark_master')}:</span>
+    ${opts.map(o => `
+      <button data-act="mastery" data-id="${esc(id)}" data-m="${o.m}"
+        class="text-xs px-2.5 py-1 rounded-full border transition ${
+          cur === o.m ? o.color + ' border-transparent font-semibold'
+                      : 'border-slate-300 dark:border-slate-600 hover:bg-slate-100 dark:hover:bg-slate-800'}">
+        ${o.dot} ${masteryLabel(o.m)}
+      </button>`).join('')}
+  </div>`;
+}
+function masteryRing(id: string): string {   // 卡片左側狀態色條
+  const m = MasteryStore.get(id);
+  return m === 'mastered' ? 'border-l-emerald-500' : m === 'review' ? 'border-l-amber-500' : 'border-l-rose-400';
+}
+
+/* ================= 概念/公式卡片 ================= */
+function conceptCardHTML(c: Concept): string {
+  const rel = (c.relatedQuestionIds || []).filter(q => QS.has(q));
+  return `
+  <div class="card-hover bg-white dark:bg-slate-900 rounded-xl border-l-4 ${masteryRing(c.conceptId)} border border-slate-200 dark:border-slate-700 shadow-sm p-4">
+    <div class="flex items-start justify-between gap-2">
+      <div>
+        <span class="text-[11px] font-mono px-1.5 py-0.5 rounded bg-sky-100 dark:bg-sky-900 text-sky-700 dark:text-sky-300">${esc(c.conceptId)}</span>
+        <button class="ml-1 font-semibold text-base hover:underline text-left" data-act="open" data-type="concept" data-id="${esc(c.conceptId)}">${esc(cTitle(c))}</button>
+        <div class="text-xs text-slate-400 mt-0.5">${esc(LANG === 'zh' ? c.titleEn : c.title)}</div>
+      </div>
+    </div>
+    <p class="text-sm text-slate-600 dark:text-slate-300 mt-2 line-clamp-3">${esc(cExpl(c)).slice(0, 160)}…</p>
+    <div class="flex flex-wrap gap-1 mt-2">${(LANG==='zh'?c.tags:c.tagsEn||c.tags).map(x => `<span class="text-[11px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-500">${esc(x)}</span>`).join('')}</div>
+    <div class="mt-3">${masteryButtons(c.conceptId)}</div>
+    ${rel.length ? `<div class="mt-2 flex flex-wrap gap-1.5 items-center"><span class="text-xs text-slate-400">${t('relatedQ')}:</span>
+      ${rel.map(qid => `<button class="text-xs px-2 py-0.5 rounded-full bg-indigo-50 dark:bg-indigo-900/60 text-indigo-600 dark:text-indigo-300 hover:ring-1 ring-indigo-400" data-act="open" data-type="question" data-id="${esc(qid)}">${esc(qid)}</button>`).join('')}
+    </div>` : ''}
+  </div>`;
+}
+function formulaCardHTML(f: Formula): string {
+  const rel = (f.relatedConceptIds || []).filter(x => CP.has(x));
+  return `
+  <div class="card-hover bg-white dark:bg-slate-900 rounded-xl border-l-4 ${masteryRing(f.formulaId)} border border-slate-200 dark:border-slate-700 shadow-sm p-4">
+    <div>
+      <span class="text-[11px] font-mono px-1.5 py-0.5 rounded bg-violet-100 dark:bg-violet-900 text-violet-700 dark:text-violet-300">${esc(f.formulaId)}</span>
+      <button class="ml-1 font-semibold text-base hover:underline text-left" data-act="open" data-type="formula" data-id="${esc(f.formulaId)}">${esc(fName(f))}</button>
+      <div class="text-xs text-slate-400 mt-0.5">${esc(LANG === 'zh' ? f.nameEn : f.name)}</div>
+    </div>
+    <div class="math bg-slate-50 dark:bg-slate-800/70 rounded-lg px-3 py-2.5 mt-2 text-slate-800 dark:text-slate-100 overflow-x-auto">${esc(f.latex)}</div>
+    <p class="text-sm text-slate-600 dark:text-slate-300 mt-2 line-clamp-3">${esc(fDesc(f)).slice(0, 150)}…</p>
+    <div class="mt-3">${masteryButtons(f.formulaId)}</div>
+    ${rel.length ? `<div class="mt-2 flex flex-wrap gap-1.5 items-center"><span class="text-xs text-slate-400">${t('relatedC')}:</span>
+      ${rel.map(cid => `<button class="text-xs px-2 py-0.5 rounded-full bg-emerald-50 dark:bg-emerald-900/60 text-emerald-600 dark:text-emerald-300 hover:ring-1 ring-emerald-400" data-act="open" data-type="concept" data-id="${esc(cid)}">${esc(cid)} ${esc(cTitle(CP.get(cid)!)).slice(0,18)}</button>`).join('')}
+    </div>` : ''}
+  </div>`;
+}
+
+/* ================= 概念/公式/題目 詳情彈窗內容 ================= */
+function conceptDetailHTML(id: string): string {
+  const c = CP.get(id); if (!c) return '';
+  const relQ = (c.relatedQuestionIds || []).filter(q => QS.has(q));
+  const relF = (c.relatedFormulaIds || []).filter(x => FM.has(x));
+  return `
+  <div>
+    <div class="flex items-center gap-2 flex-wrap">
+      <span class="text-xs font-mono px-2 py-0.5 rounded bg-sky-100 dark:bg-sky-900 text-sky-700 dark:text-sky-300">${esc(c.conceptId)}</span>
+      <span class="text-xs px-2 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-500">${t('concept')}</span>
+    </div>
+    <h2 class="text-xl font-bold mt-2">${esc(cTitle(c))}</h2>
+    <div class="text-sm text-slate-400">${esc(LANG === 'zh' ? c.titleEn : c.title)}</div>
+    <div class="math mt-4 text-[15px] leading-relaxed whitespace-pre-wrap">${esc(cExpl(c))}</div>
+    <div class="mt-4">${masteryButtons(c.conceptId)}</div>
+    ${relF.length ? `<div class="mt-4"><div class="text-sm font-semibold mb-1.5">🔗 ${t('relatedF')}</div>
+      <div class="flex flex-wrap gap-1.5">${relF.map(x => `<button class="text-xs px-2.5 py-1 rounded-lg bg-violet-50 dark:bg-violet-900/60 text-violet-600 dark:text-violet-300 hover:ring-1 ring-violet-400" data-act="open" data-type="formula" data-id="${esc(x)}">${esc(x)} ${esc(fName(FM.get(x)!))}</button>`).join('')}</div></div>` : ''}
+    ${relQ.length ? `<div class="mt-4"><div class="text-sm font-semibold mb-1.5">🔗 ${t('relatedQ')}</div>
+      <div class="flex flex-wrap gap-1.5">${relQ.map(x => `<button class="text-xs px-2.5 py-1 rounded-lg bg-indigo-50 dark:bg-indigo-900/60 text-indigo-600 dark:text-indigo-300 hover:ring-1 ring-indigo-400" data-act="open" data-type="question" data-id="${esc(x)}">${esc(x)}</button>`).join('')}</div></div>` : ''}
+  </div>`;
+}
+function formulaDetailHTML(id: string): string {
+  const f = FM.get(id); if (!f) return '';
+  const relC = (f.relatedConceptIds || []).filter(x => CP.has(x));
+  const relQ = [...QS.values()].filter(q => (q.relatedFormulaIds || []).includes(id)).map(q => q.questionId);
+  return `
+  <div>
+    <div class="flex items-center gap-2 flex-wrap">
+      <span class="text-xs font-mono px-2 py-0.5 rounded bg-violet-100 dark:bg-violet-900 text-violet-700 dark:text-violet-300">${esc(f.formulaId)}</span>
+      <span class="text-xs px-2 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-500">${t('formula')}</span>
+    </div>
+    <h2 class="text-xl font-bold mt-2">${esc(fName(f))}</h2>
+    <div class="text-sm text-slate-400">${esc(LANG === 'zh' ? f.nameEn : f.name)}</div>
+    <div class="math bg-slate-50 dark:bg-slate-800/70 rounded-xl px-4 py-4 mt-3 text-lg overflow-x-auto">${esc(f.latex)}</div>
+    <div class="math mt-4 text-[15px] leading-relaxed whitespace-pre-wrap">${esc(fDesc(f))}</div>
+    <div class="mt-4">${masteryButtons(f.formulaId)}</div>
+    ${relC.length ? `<div class="mt-4"><div class="text-sm font-semibold mb-1.5">🔗 ${t('relatedC')}</div>
+      <div class="flex flex-wrap gap-1.5">${relC.map(x => `<button class="text-xs px-2.5 py-1 rounded-lg bg-emerald-50 dark:bg-emerald-900/60 text-emerald-600 dark:text-emerald-300 hover:ring-1 ring-emerald-400" data-act="open" data-type="concept" data-id="${esc(x)}">${esc(x)} ${esc(cTitle(CP.get(x)!))}</button>`).join('')}</div></div>` : ''}
+    ${relQ.length ? `<div class="mt-4"><div class="text-sm font-semibold mb-1.5">🔗 ${t('relatedQ')}</div>
+      <div class="flex flex-wrap gap-1.5">${relQ.map(x => `<button class="text-xs px-2.5 py-1 rounded-lg bg-indigo-50 dark:bg-indigo-900/60 text-indigo-600 dark:text-indigo-300 hover:ring-1 ring-indigo-400" data-act="open" data-type="question" data-id="${esc(x)}">${esc(x)}</button>`).join('')}</div></div>` : ''}
+  </div>`;
+}
+/** 題目詳情（reveal=true 顯示答案與解析；inPractice=true 時選項可點擊作答） */
+function questionDetailHTML(qid: string, reveal = true, selected?: string, inPractice = false): string {
+  const q = QS.get(qid); if (!q) return '';
+  const letters = ['A', 'B', 'C', 'D'];
+  const optRow = (k: string) => {
+    const isCorrect = k === q.correctAnswer;
+    const isSel = selected === k;
+    let cls = 'border-slate-200 dark:border-slate-700';
+    if (reveal && isCorrect) cls = 'border-emerald-500 bg-emerald-50 dark:bg-emerald-900/30';
+    else if (reveal && isSel) cls = 'border-rose-500 bg-rose-50 dark:bg-rose-900/30';
+    else if (isSel) cls = 'border-sky-500 bg-sky-50 dark:bg-sky-900/30';
+    const clickable = inPractice && !reveal;
+    return `
+    <div ${clickable ? `data-act="prac-answer" data-opt="${k}"` : ''}
+      class="${clickable ? 'cursor-pointer hover:border-sky-400 transition ' : ''}flex gap-3 items-start border rounded-xl px-3.5 py-2.5 ${cls}">
+      <span class="font-bold text-sm mt-0.5 w-6 shrink-0 ${reveal && isCorrect ? 'text-emerald-600' : reveal && isSel ? 'text-rose-600' : ''}">${k}</span>
+      <div class="text-sm flex-1">${esc(qOpt(q, k))}</div>
+      ${reveal && isCorrect ? '<span class="text-emerald-600 text-lg leading-none">✓</span>' : reveal && isSel ? '<span class="text-rose-600 text-lg leading-none">✗</span>' : ''}
+    </div>`;
+  };
+  const relC = (q.relatedConceptIds || []).filter(x => CP.has(x));
+  const relF = (q.relatedFormulaIds || []).filter(x => FM.has(x));
+  const wrongSaved = WrongStore.has(qid);
+  return `
+  <div>
+    <div class="flex items-center gap-2 flex-wrap text-xs">
+      <span class="font-mono px-2 py-0.5 rounded bg-indigo-100 dark:bg-indigo-900 text-indigo-700 dark:text-indigo-300">${esc(q.questionId)}</span>
+      <span class="px-2 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-500">${CH.has(q.chapterId) ? esc(chName(CH.get(q.chapterId)!)) : esc(q.chapterId)}</span>
+      <span class="px-2 py-0.5 rounded ${q.difficulty==='easy'?'bg-emerald-100 text-emerald-700 dark:bg-emerald-900 dark:text-emerald-300':q.difficulty==='medium'?'bg-amber-100 text-amber-700 dark:bg-amber-900 dark:text-amber-300':'bg-rose-100 text-rose-700 dark:bg-rose-900 dark:text-rose-300'}">${diffLabel(q.difficulty)}</span>
+      ${(LANG==='zh'?q.tags:q.tagsEn||q.tags).map(x => `<span class="px-2 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-500">${esc(x)}</span>`).join('')}
+    </div>
+    <div class="math mt-3 text-[15px] font-medium leading-relaxed whitespace-pre-wrap">${esc(qText(q))}</div>
+    <div class="space-y-2 mt-3">${letters.map(optRow).join('')}</div>
+    ${reveal ? `
+      <div class="mt-4 p-3.5 rounded-xl bg-emerald-50 dark:bg-emerald-900/30 border border-emerald-200 dark:border-emerald-800">
+        <span class="text-sm font-bold text-emerald-700 dark:text-emerald-300">${t('correct')}：${q.correctAnswer}</span>
+        ${selected ? `<span class="text-sm text-slate-500 ml-3">${t('yourAns')}：${selected}${selected === q.correctAnswer ? ' ✓' : ' ✗'}</span>` : ''}
+      </div>
+      <div class="mt-3">
+        <div class="text-sm font-bold mb-1.5">📝 ${t('explanation')}</div>
+        <div class="math text-sm leading-relaxed bg-slate-50 dark:bg-slate-800/70 rounded-xl p-4 whitespace-pre-wrap">${esc(qExpl(q))}</div>
+      </div>` : ''}
+    <div class="mt-4 flex flex-wrap gap-2 items-center">
+      <button class="text-xs px-3 py-1.5 rounded-lg ${wrongSaved ? 'bg-amber-500 text-white' : 'bg-slate-200 dark:bg-slate-700 hover:opacity-80'}" data-act="fav" data-id="${esc(qid)}">⭐ ${wrongSaved ? t('favDone') : t('fav')}</button>
+      ${inPractice ? '' : `<button class="text-xs px-3 py-1.5 rounded-lg bg-sky-600 text-white hover:opacity-90" data-act="practice-one" data-id="${esc(qid)}">▶ ${t('openInQuiz')}</button>`}
+    </div>
+    ${relC.length || relF.length ? `<div class="mt-4 grid sm:grid-cols-2 gap-3">
+      ${relC.length ? `<div><div class="text-xs font-semibold text-slate-400 mb-1">🔗 ${t('relatedC')}</div>
+        <div class="flex flex-wrap gap-1.5">${relC.map(x => `<button class="text-xs px-2 py-1 rounded-lg bg-emerald-50 dark:bg-emerald-900/60 text-emerald-600 dark:text-emerald-300" data-act="open" data-type="concept" data-id="${esc(x)}">${esc(x)}</button>`).join('')}</div></div>` : ''}
+      ${relF.length ? `<div><div class="text-xs font-semibold text-slate-400 mb-1">🔗 ${t('relatedF')}</div>
+        <div class="flex flex-wrap gap-1.5">${relF.map(x => `<button class="text-xs px-2 py-1 rounded-lg bg-violet-50 dark:bg-violet-900/60 text-violet-600 dark:text-violet-300" data-act="open" data-type="formula" data-id="${esc(x)}">${esc(x)}</button>`).join('')}</div></div>` : ''}
+    </div>` : ''}
+  </div>`;
+}
+function helpModalHTML(): string {
+  const zh = LANG === 'zh';
+  return `
+  <div class="text-[15px] leading-relaxed space-y-3">
+    <h2 class="text-xl font-bold">📖 ${t('help_title')}</h2>
+    <div class="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/70">
+      <div class="font-semibold mb-1">${zh ? '一、資料載入與更新（重要）' : '1. Loading & updating data (important)'}</div>
+      <ol class="list-decimal ml-5 space-y-1 text-sm">
+        <li>${zh ? '本程式讀取與 index.html 同目錄的 <code>knowledge_base.json</code> 與 <code>question_bank.json</code>，業務數據不硬編碼。' : 'The app reads <code>knowledge_base.json</code> and <code>question_bank.json</code> from the same folder — no data is hardcoded.'}</li>
+        <li>${zh ? '直接雙擊打開時，部分瀏覽器會阻止讀取本地檔案（CORS限制）。此時程式會彈出檔案選擇界面：首次選擇兩個JSON後會自動快取到LocalStorage，之後雙擊即可直接使用。' : 'When opened via double-click, some browsers block local file reads (CORS). A file picker appears — pick both JSON files once; they are cached in LocalStorage for later offline use.'}</li>
+        <li>${zh ? '<b>更新題庫/知識庫</b>：替換同目錄JSON檔案後，點擊頂欄「更新資料」重新選擇檔案即可；或用本機伺服器打開（如 <code>python -m http.server</code>）自動讀取。' : 'To update: replace the JSON files, click "Update Data" in the header to re-pick them; or serve the folder locally (e.g. <code>python -m http.server</code>) for auto-fetching.'}</li>
+        <li>${zh ? '<b>個人學習記錄不會丟失</b>：掌握狀態、閃卡記錄、錯題本、做題記錄存於獨立的LocalStorage鍵值，與業務JSON完全分離。若更新後ID有變動，對應舊標記將自動失聯（不影響其他記錄）。' : 'Your personal records (mastery, flashcards, wrong book, logs) live in separate LocalStorage keys and survive JSON updates. If IDs change, old marks for renamed IDs are simply orphaned.'}</li>
+      </ol>
+    </div>
+    <div class="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/70">
+      <div class="font-semibold mb-1">${zh ? '二、功能速覽' : '2. Feature map'}</div>
+      <ul class="list-disc ml-5 text-sm space-y-1">
+        <li>${zh ? '📚 知識庫：五大章節概念/公式卡片，三檔掌握標記，關聯題目跳轉' : '📚 Knowledge: chapter concept/formula cards, 3-level mastery, related questions, keyword search (zh/en, across concepts, formulas and questions)'}</li>
+        <li>${zh ? '🃏 閃卡Anki：正面標題、點擊翻面，評分「記住/模糊/忘記」，優先抽出薄弱內容（忘記>未掌握>待複習>已掌握）' : '🃏 Flashcards: flip cards, rate remember/fuzzy/forgot; weak items are drawn first (forgot > unmastered > review > mastered)'}</li>
+        <li>${zh ? '🕸️ 知識圖譜：D3力導向圖，章節/概念/公式/題目四類節點按掌握狀態著色' : '🕸️ Graph: D3 force-directed map, nodes colored by mastery status'}</li>
+        <li>${zh ? '📝 題庫考試：練習模式（即時解析）+ 模擬考試（計時+報告）' : '📝 Quiz: practice mode (instant explanations) + timed mock exam with report'}</li>
+        <li>${zh ? '⭐ 錯題本：自動收集錯題，可重做、可匯出 Markdown / PDF' : '⭐ Wrong book: auto-collected, redo, export Markdown / PDF'}</li>
+        <li>${zh ? '📊 學習統計：分章掌握度、正確率可視化' : '📊 Statistics: per-chapter mastery and accuracy charts'}</li>
+      </ul>
+    </div>
+    <div class="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/70">
+      <div class="font-semibold mb-1">${zh ? '三、常見問題' : '3. FAQ'}</div>
+      <ul class="list-disc ml-5 text-sm space-y-1">
+        <li>${zh ? '公式顯示異常？需要網路連線載入KaTeX CDN；渲染失敗會顯示原始LaTeX。' : 'Formulas look wrong? KaTeX loads from CDN — a failed render falls back to raw LaTeX.'}</li>
+        <li>${zh ? '清除瀏覽器資料會刪除所有本地學習記錄，請謹慎操作。' : 'Clearing browser data deletes all local study records — be careful.'}</li>
+      </ul>
+    </div>
+  </div>`;
+}
+
+/* ================= 頂部導航欄 ================= */
+function renderTopnav(): void {
+  const el = document.getElementById('topnav')!;
+  const item = (v: ViewKey) => {
+    const n = NAV.find(x => x.key === v)!;
+    const act = ACTIVE === v;
+    return `<button data-act="nav" data-v="${v}" class="px-3 py-1.5 rounded-lg text-sm font-medium whitespace-nowrap transition ${
+      act ? 'bg-sky-600 text-white shadow' : 'text-slate-600 dark:text-slate-300 hover:bg-slate-200/70 dark:hover:bg-slate-800'}">${n.icon} ${t('nav_' + v)}</button>`;
+  };
+  el.innerHTML = `
+  <div class="bg-white/90 dark:bg-slate-900/90 backdrop-blur border-b border-slate-200 dark:border-slate-800">
+    <div class="max-w-[1400px] mx-auto px-3 sm:px-5 py-2.5 flex items-center gap-2 flex-wrap">
+      <div class="font-extrabold text-base mr-2 whitespace-nowrap">🎓 FRM <span class="text-sky-600 dark:text-sky-400">Part II</span></div>
+      <nav class="flex items-center gap-1 overflow-x-auto flex-1">
+        ${NAV.map(n => item(n.key)).join('')}
+      </nav>
+      <div class="flex items-center gap-1.5">
+        <button data-act="update-data" class="text-xs px-2.5 py-1.5 rounded-lg bg-slate-200 dark:bg-slate-800 hover:opacity-80" title="Update JSON">📥 ${t('update_json')}</button>
+        <button data-act="help" class="text-xs px-2.5 py-1.5 rounded-lg bg-slate-200 dark:bg-slate-800 hover:opacity-80">❓ ${t('help')}</button>
+        <button data-act="lang" class="text-xs px-2.5 py-1.5 rounded-lg bg-sky-100 dark:bg-sky-900 text-sky-700 dark:text-sky-300 font-bold hover:opacity-80" title="切換語言 / Switch language">${t('lang_btn')}</button>
+        <button data-act="theme" class="text-xs px-2.5 py-1.5 rounded-lg bg-slate-200 dark:bg-slate-800 hover:opacity-80" title="深色/淺色">${THEME === 'dark' ? '☀️' : '🌙'}</button>
+      </div>
+    </div>
+  </div>`;
+  document.documentElement.lang = LANG === 'zh' ? 'zh-Hant' : 'en';
+}
+
+/* ================= 主渲染入口 ================= */
+function renderApp(): void {
+  renderTopnav();
+  const app = document.getElementById('app')!;
+  if (!READY) { app.innerHTML = ''; return; }
+  if (ACTIVE === 'kb') renderKnowledge(app);
+  else if (ACTIVE === 'fm') renderFormulas(app);
+  else if (ACTIVE === 'fc') renderFlashcards(app);
+  else if (ACTIVE === 'graph') renderGraphView(app);
+  else if (ACTIVE === 'quiz') renderQuizView(app);
+  else if (ACTIVE === 'wrong') renderWrongView(app);
+  else if (ACTIVE === 'stats') renderStatsView(app);
+}
+
+/* ================= 視圖1：章節知識點瀏覽（含關鍵字搜尋引擎） ================= */
+const KBState = { ch: 'all', sub: 'concept' as 'concept'|'formula', status: 'all' as 'all'|Mastery, kw: '' };
+
+interface KBSearchHit { type: 'concept'|'formula'|'question'; id: string; chId: string; title: string; snippet: string; }
+
+/** 關鍵字搜尋引擎：跨概念/公式/題目，中英文欄位同時比對；多關鍵字（空格分隔）為 AND 邏輯 */
+function kbSearch(kw: string): { concepts: KBSearchHit[]; formulas: KBSearchHit[]; questions: KBSearchHit[] } {
+  const tokens = kw.toLowerCase().split(/\s+/).filter(Boolean);
+  const out = { concepts: [] as KBSearchHit[], formulas: [] as KBSearchHit[], questions: [] as KBSearchHit[] };
+  if (!tokens.length) return out;
+  const inText = (hay: string): boolean => {
+    const t = hay.toLowerCase();
+    return tokens.every(tok => t.indexOf(tok) >= 0);
+  };
+  // 章節範圍：選了特定章節則在該章內搜尋，否則全庫搜尋
+  const chOk = (chId: string): boolean => KBState.ch === 'all' || KBState.ch === chId;
+  // 生成摘要：定位第一個命中位置，前後取文
+  const snippet = (text: string): string => {
+    const lower = text.toLowerCase();
+    let idx = -1, hitLen = 0;
+    tokens.forEach(tok => {
+      const i = lower.indexOf(tok);
+      if (i >= 0 && (idx < 0 || i < idx)) { idx = i; hitLen = tok.length; }
+    });
+    if (idx < 0) idx = 0;
+    const start = Math.max(0, idx - 40);
+    const end = Math.min(text.length, idx + hitLen + 110);
+    return (start > 0 ? '…' : '') + text.slice(start, end) + (end < text.length ? '…' : '');
+  };
+  KB!.chapters.forEach(c => {
+    (c.concepts || []).forEach(x => {
+      if (!chOk(c.chapterId)) return;
+      const hay = [x.conceptId, x.title, x.titleEn, x.explanation, x.explanationEn, (x.tags || []).join(' '), (x.tagsEn || []).join(' ')].join('\n');
+      if (inText(hay)) out.concepts.push({ type: 'concept', id: x.conceptId, chId: c.chapterId, title: cTitle(x), snippet: snippet(x.explanation || x.title) });
+    });
+    (c.formulas || []).forEach(x => {
+      if (!chOk(c.chapterId)) return;
+      const hay = [x.formulaId, x.name, x.nameEn, x.latex, x.description, x.descriptionEn].join('\n');
+      if (inText(hay)) out.formulas.push({ type: 'formula', id: x.formulaId, chId: c.chapterId, title: fName(x), snippet: snippet(x.description || x.name) });
+    });
+  });
+  QB!.questions.forEach(q => {
+    if (!chOk(q.chapterId)) return;
+    const hay = [q.questionId, q.questionText, q.questionTextEn, (q.tags || []).join(' ')].join('\n');
+    if (inText(hay)) out.questions.push({ type: 'question', id: q.questionId, chId: q.chapterId, title: qText(q), snippet: snippet(qText(q)) });
+  });
+  return out;
+}
+
+/** 在已 HTML 轉義的文本上高亮關鍵字（mark 標記） */
+function hlMark(text: string, kw: string): string {
+  const escd = esc(text);
+  const tokens = kw.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (!tokens.length) return escd;
+  let outText = escd;
+  tokens.forEach(tok => {
+    // 轉義正則特殊字符，避免關鍵字含符號時崩潰
+    const safe = tok.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    outText = outText.replace(new RegExp(safe, 'gi'), m => '<mark class="bg-amber-200 dark:bg-amber-600/50 rounded px-0.5">' + m + '</mark>');
+  });
+  return outText;
+}
+
+/** 搜尋結果卡片（點擊打開對應詳情彈窗） */
+function searchHitHTML(h: KBSearchHit, kw: string): string {
+  const cls = h.type === 'concept' ? 'bg-sky-100 dark:bg-sky-900 text-sky-700 dark:text-sky-300'
+    : h.type === 'formula' ? 'bg-violet-100 dark:bg-violet-900 text-violet-700 dark:text-violet-300'
+    : 'bg-indigo-100 dark:bg-indigo-900 text-indigo-700 dark:text-indigo-300';
+  return `
+  <button data-act="open" data-type="${h.type}" data-id="${esc(h.id)}" class="w-full text-left bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-700 p-3.5 card-hover">
+    <div class="flex items-center gap-2 text-[11px] text-slate-400 mb-1">
+      <span class="px-1.5 py-0.5 rounded font-mono ${cls}">${esc(h.id)}</span>
+      <span>${CH.has(h.chId) ? esc(chName(CH.get(h.chId)!)) : ''}</span>
+      <span class="ml-auto">${t(h.type)}</span>
+    </div>
+    <div class="text-sm font-semibold line-clamp-1">${hlMark(h.title, kw)}</div>
+    <div class="text-xs text-slate-500 dark:text-slate-400 mt-1 line-clamp-2">${hlMark(h.snippet, kw)}</div>
+  </button>`;
+}
+
+function renderKnowledge(app: HTMLElement): void {
+  const chapters = KB!.chapters;
+  const kw = KBState.kw.trim();
+  const sidebar = `
+  <aside class="hidden lg:block w-60 shrink-0">
+    <div class="sticky top-20 space-y-1.5">
+      <button data-act="kb-ch" data-ch="all" class="w-full text-left px-3 py-2 rounded-lg text-sm font-medium ${KBState.ch==='all'?'bg-sky-600 text-white':'hover:bg-slate-200/70 dark:hover:bg-slate-800'}">${t('all')} (${CP.size} ${t('concepts_n')} / ${FM.size} ${t('formulas_n')})</button>
+      ${chapters.map(c => {
+        const done = c.concepts.filter(x=>MasteryStore.get(x.conceptId)==='mastered').length + c.formulas.filter(x=>MasteryStore.get(x.formulaId)==='mastered').length;
+        const tot = c.concepts.length + c.formulas.length;
+        return `<button data-act="kb-ch" data-ch="${esc(c.chapterId)}" class="w-full text-left px-3 py-2 rounded-lg text-sm ${KBState.ch===c.chapterId?'bg-sky-600 text-white':'hover:bg-slate-200/70 dark:hover:bg-slate-800'}">
+          <div class="font-medium leading-tight">${esc(chName(c))}</div>
+          <div class="text-[11px] opacity-70 mt-0.5">${tot} · ✅${done}</div>
+        </button>`;}).join('')}
+    </div>
+  </aside>
+  <div class="lg:hidden w-full mb-3">
+    <select id="kb-ch-select" class="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-sm">
+      <option value="all">${t('all')}</option>
+      ${chapters.map(c => `<option value="${esc(c.chapterId)}" ${KBState.ch===c.chapterId?'selected':''}>${esc(chName(c))}</option>`).join('')}
+    </select>
+  </div>`;
+  const chapterInfo = KBState.ch !== 'all' && CH.has(KBState.ch)
+    ? '<div class="mb-4 p-4 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700">' +
+      '<div class="font-bold">' + esc(chName(CH.get(KBState.ch)!)) + '</div>' +
+      '<div class="text-sm text-slate-500 mt-1">' + esc(chSummary(CH.get(KBState.ch)!)) + '</div></div>' : '';
+  // 搜尋列
+  const ph = LANG === 'zh'
+    ? '關鍵字搜尋：概念 / 公式 / 題目（中英文均可，空格分隔多關鍵字）'
+    : 'Keyword search: concepts / formulas / questions (zh & en, space-separated)';
+  const searchBar = `
+  <div class="flex flex-wrap items-center gap-2 mb-4">
+    <div class="relative flex-1 min-w-[260px]">
+      <span class="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-sm">🔍</span>
+      <input id="kb-kw" value="${esc(KBState.kw)}" placeholder="${esc(ph)}"
+        class="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 pl-9 pr-9 py-2 text-sm focus:ring-2 ring-sky-400 outline-none">
+      ${KBState.kw ? '<button data-act="kb-kw-clear" class="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 text-sm">✕</button>' : ''}
+    </div>
+    ${kw ? '<span class="text-xs text-slate-400">' + (LANG === 'zh' ? '範圍：' : 'Scope: ') + (KBState.ch === 'all' ? (LANG === 'zh' ? '全部章節' : 'All chapters') : esc(chName(CH.get(KBState.ch)!))) + '</span>' : ''}
+  </div>`;
+  let bodyHTML = '';
+  if (kw) {
+    // ---- 搜尋模式 ----
+    const res = kbSearch(kw);
+    const n = res.concepts.length + res.formulas.length + res.questions.length;
+    const group = (title: string, arr: KBSearchHit[]) => arr.length ? (
+      '<div class="mt-4 mb-2 text-sm font-bold text-slate-500">' + title + ' · ' + arr.length + '</div>' +
+      '<div class="grid md:grid-cols-2 gap-3">' + arr.map(x => searchHitHTML(x, kw)).join('') + '</div>') : '';
+    const scopeNote = KBState.ch !== 'all' ? (LANG === 'zh' ? '（當前章節範圍，點「全部」可搜全庫）' : ' (current chapter scope — click All to search the full library)') : '';
+    bodyHTML = '<div class="text-sm mb-1 ' + (n ? 'text-slate-500' : 'text-rose-500') + '">'
+      + (LANG === 'zh' ? '搜尋「' + esc(kw) + '」：' : 'Search "' + esc(kw) + '": ')
+      + n + (LANG === 'zh' ? ' 個結果' : ' results') + scopeNote + '</div>'
+      + group(t('concept'), res.concepts)
+      + group(t('formula'), res.formulas)
+      + group(t('question'), res.questions)
+      + (n ? '' : '<div class="text-center text-slate-400 py-16">' + t('noMatch') + '</div>');
+  } else {
+    // ---- 瀏覽模式（章節 + 子標籤 + 掌握狀態過濾） ----
+    const items: { html: string }[] = [];
+    const poolCh = KBState.ch === 'all' ? chapters : chapters.filter(c => c.chapterId === KBState.ch);
+    const statusOK = (id: string) => KBState.status === 'all' || MasteryStore.get(id) === KBState.status;
+    if (KBState.sub === 'concept') {
+      poolCh.forEach(c => (c.concepts || []).filter(x => statusOK(x.conceptId)).forEach(x => items.push({ html: conceptCardHTML(x) })));
+    } else {
+      poolCh.forEach(c => (c.formulas || []).filter(x => statusOK(x.formulaId)).forEach(x => items.push({ html: formulaCardHTML(x) })));
+    }
+    const tabs = '<div class="flex flex-wrap items-center gap-2 mb-4">'
+      + '<div class="flex rounded-lg overflow-hidden border border-slate-300 dark:border-slate-700">'
+      + '<button data-act="kb-sub" data-sub="concept" class="px-3.5 py-1.5 text-sm font-medium ' + (KBState.sub === 'concept' ? 'bg-sky-600 text-white' : 'bg-white dark:bg-slate-900') + '">📚 ' + t('concept') + ' (' + CP.size + ')</button>'
+      + '<button data-act="kb-sub" data-sub="formula" class="px-3.5 py-1.5 text-sm font-medium ' + (KBState.sub === 'formula' ? 'bg-sky-600 text-white' : 'bg-white dark:bg-slate-900') + '">🧮 ' + t('formula') + ' (' + FM.size + ')</button>'
+      + '</div>'
+      + '<div class="flex rounded-lg overflow-hidden border border-slate-300 dark:border-slate-700 text-sm">'
+      + (['all','mastered','review','unmastered'] as const).map(s2 =>
+          '<button data-act="kb-status" data-s="' + s2 + '" class="px-3 py-1.5 ' + (KBState.status === s2 ? 'bg-slate-700 dark:bg-slate-300 text-white dark:text-slate-900 font-semibold' : 'bg-white dark:bg-slate-900') + '">' + (s2 === 'all' ? t('all') : masteryLabel(s2)) + '</button>').join('')
+      + '</div>'
+      + '<span class="text-xs text-slate-400">' + (LANG === 'zh' ? '或在上方搜尋框輸入關鍵字跨章查找' : 'or type keywords above to search across chapters') + '</span>'
+      + '</div>';
+    bodyHTML = tabs
+      + (items.length ? '<div class="grid md:grid-cols-2 gap-4">' + items.map(x => x.html).join('') + '</div>'
+                      : '<div class="text-center text-slate-400 py-16">' + t('noMatch') + '</div>');
+  }
+  app.innerHTML = '<div class="flex gap-5 items-start">' + sidebar
+    + '<div class="flex-1 min-w-0">' + chapterInfo + searchBar + bodyHTML + '</div></div>';
+  renderMath(app);
+}
+
+/* ================= 視圖2：公式總覽（獨立導航項） ================= */
+const FMState = { ch: 'all', status: 'all' as 'all'|Mastery, kw: '' };
+function renderFormulas(app: HTMLElement): void {
+  const list = KB!.chapters
+    .filter(c => FMState.ch === 'all' || c.chapterId === FMState.ch)
+    .flatMap(c => (c.formulas || []).map(f => ({ f, ch: c })))
+    .filter(({ f }) => (FMState.status === 'all' || MasteryStore.get(f.formulaId) === FMState.status)
+      && (!FMState.kw || (f.name + f.nameEn + f.description + f.descriptionEn + f.formulaId).toLowerCase().includes(FMState.kw.toLowerCase())));
+  app.innerHTML = `
+  <div class="mb-4 flex flex-wrap items-center gap-2">
+    <h1 class="text-xl font-bold mr-2">🧮 ${t('nav_fm')}</h1>
+    <select id="fm-ch" class="rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-1.5 text-sm">
+      <option value="all">${t('all')}</option>
+      ${KB!.chapters.map(c => `<option value="${esc(c.chapterId)}" ${FMState.ch===c.chapterId?'selected':''}>${esc(chName(c))}</option>`).join('')}
+    </select>
+    <select id="fm-status" class="rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-1.5 text-sm">
+      ${(['all','mastered','review','unmastered'] as const).map(s => `<option value="${s}" ${FMState.status===s?'selected':''}>${s==='all'?t('all'):masteryLabel(s)}</option>`).join('')}
+    </select>
+    <input id="fm-kw" value="${esc(FMState.kw)}" placeholder="${LANG==='zh'?'搜尋公式名稱/說明…':'Search formulas…'}" class="rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-1.5 text-sm w-56">
+    <span class="text-sm text-slate-400">${list.length} ${t('formulas_n')}</span>
+  </div>
+  ${list.length ? `<div class="grid md:grid-cols-2 xl:grid-cols-3 gap-4">${list.map(({ f }) => formulaCardHTML(f)).join('')}</div>`
+    : `<div class="text-center text-slate-400 py-16">${t('noMatch')}</div>`}`;
+  renderMath(app);
+}
+
+/* ================= 視圖3：Anki 閃卡 ================= */
+interface FCDeck { items: { id: string; type: 'concept'|'formula' }[]; }
+const FCState = { ch: 'all', scope: 'weak' as 'all'|'weak', type: 'all' as 'all'|'concept'|'formula',
+  deck: [] as { id: string; type: 'concept'|'formula' }[], flipped: false, session: { remember: 0, fuzzy: 0, forgot: 0 },
+  cur: null as string | null };
+
+function fcAllCards(): { id: string; type: 'concept'|'formula' }[] {
+  const out: { id: string; type: 'concept'|'formula' }[] = [];
+  KB!.chapters.forEach(c => {
+    if (FCState.ch !== 'all' && c.chapterId !== FCState.ch) return;
+    c.concepts.forEach(x => out.push({ id: x.conceptId, type: 'concept' }));
+    c.formulas.forEach(x => out.push({ id: x.formulaId, type: 'formula' }));
+  });
+  return out;
+}
+/** 簡易Anki優先抽卡：忘記 > 未掌握 > 待複習 > 已掌握，另疊加歷史評分與隨機性 */
+function fcWeight(card: { id: string; type: 'concept' | 'formula' }): number {
+  const m = MasteryStore.get(card.id);
+  const h = FlashStore.all()[card.id];
+  let w = m === 'unmastered' ? 40 : m === 'review' ? 25 : 8;
+  if (h) {
+    if (h.lastRating === 'forgot') w += 30;
+    else if (h.lastRating === 'fuzzy') w += 15;
+    else w -= 5;                                   // 記住 → 降低權重
+    w += Math.min(h.forgot * 4, 12);               // 歷史忘記次數加權
+  }
+  if (FCState.scope === 'weak' && m === 'mastered' && (!h || h.lastRating !== 'forgot')) w = 1;  // 薄弱模式下幾乎不抽已掌握
+  return Math.max(w, 0.5) * (0.85 + Math.random() * 0.3);
+}
+function fcBuildDeck(): void {
+  let cards = fcAllCards();
+  if (FCState.type !== 'all') cards = cards.filter(x => x.type === FCState.type);
+  // 「僅未掌握+待複習」篩選：排除已掌握項（除非最近一次自評為忘記）
+  if (FCState.scope === 'weak') cards = cards.filter(x => MasteryStore.get(x.id) !== 'mastered' || FlashStore.all()[x.id]?.lastRating === 'forgot');
+  FCState.deck = cards;
+  FCState.flipped = false;
+  FCState.session = { remember: 0, fuzzy: 0, forgot: 0 };
+  fcStateExt.lastId = null;
+  FCState.cur = fcNextId();
+}
+/** 加權隨機抽出一張卡（避開上一張），Anki式優先複習薄弱點 */
+function fcNextId(): string | null {
+  const pool = FCState.deck.filter(x => x.id !== fcStateExt.lastId);
+  const use = pool.length ? pool : FCState.deck;
+  if (!use.length) return null;
+  const weights = use.map(x => fcWeight(x));
+  const total = weights.reduce((a, b) => a + b, 0);
+  let r = Math.random() * total;
+  for (let i = 0; i < use.length; i++) { r -= weights[i]; if (r <= 0) return use[i].id; }
+  return use[use.length - 1].id;
+}
+// 記錄上一張卡，避免連續重複
+const fcStateExt = { lastId: null as string | null };
+
+function fcCardFront(id: string): string {
+  const isC = id.startsWith('C') && CP.has(id);
+  const c = CP.get(id), f = FM.get(id);
+  const title = isC ? cTitle(c!) : fName(f!);
+  const typeLabel = isC ? t('concept') : t('formula');
+  const ch = KB!.chapters.find(x => isC ? x.concepts.includes(c!) : x.formulas.includes(f!));
+  const m = MasteryStore.get(id);
+  return `
+  <div class="text-center">
+    <div class="text-xs text-slate-400 mb-3">${isC ? '📚' : '🧮'} ${typeLabel} · ${ch ? esc(chName(ch)) : ''} · <span class="font-mono">${esc(id)}</span></div>
+    <div class="text-2xl font-bold my-8 px-4">${esc(title)}</div>
+    <div class="fc-hint text-sm text-slate-400 mt-10">${t('fc_flip')}</div>
+  </div>`;
+}
+function fcCardBack(id: string): string {
+  const isC = id.startsWith('C') && CP.has(id);
+  const c = CP.get(id), f = FM.get(id);
+  if (isC) {
+    return `<div class="text-left">
+      <div class="text-sm font-bold mb-2">${esc(cTitle(c!))}</div>
+      <div class="math text-sm leading-relaxed whitespace-pre-wrap">${esc(cExpl(c!))}</div>
+      <div class="mt-3">${masteryButtons(id)}</div>
+    </div>`;
+  }
+  return `<div class="text-left">
+    <div class="text-sm font-bold mb-2">${esc(fName(f!))}</div>
+    <div class="math bg-slate-50 dark:bg-slate-800/70 rounded-lg px-3 py-2.5 text-base overflow-x-auto">${esc(f!.latex)}</div>
+    <div class="math text-sm leading-relaxed whitespace-pre-wrap mt-2">${esc(fDesc(f!))}</div>
+    <div class="mt-3">${masteryButtons(id)}</div>
+  </div>`;
+}
+function fcCurrentId(): string | null {
+  if (!FCState.cur) FCState.cur = fcNextId();   // 快取當前卡，避免重渲染時換卡
+  return FCState.cur;
+}
+function renderFlashcards(app: HTMLElement): void {
+  // 首次進入自動建組
+  if (!FCState.deck.length) fcBuildDeck();
+  const cur = fcCurrentId();
+  const total = FCState.deck.length;
+  app.innerHTML = `
+  <div class="mb-4">
+    <h1 class="text-xl font-bold mb-3">🃏 ${t('nav_fc')} <span class="text-sm font-normal text-slate-400">Anki Style</span></h1>
+    <div class="flex flex-wrap items-center gap-2 text-sm">
+      <select id="fc-ch" class="rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-1.5">
+        <option value="all">${t('all')}</option>
+        ${KB!.chapters.map(c => `<option value="${esc(c.chapterId)}" ${FCState.ch===c.chapterId?'selected':''}>${esc(chName(c))}</option>`).join('')}
+      </select>
+      <select id="fc-scope" class="rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-1.5">
+        <option value="weak" ${FCState.scope==='weak'?'selected':''}>${t('fc_weak')}</option>
+        <option value="all" ${FCState.scope==='all'?'selected':''}>${t('fc_all')}</option>
+      </select>
+      <select id="fc-type" class="rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-1.5">
+        <option value="all" ${FCState.type==='all'?'selected':''}>${t('all')}</option>
+        <option value="concept" ${FCState.type==='concept'?'selected':''}>${t('concept')}</option>
+        <option value="formula" ${FCState.type==='formula'?'selected':''}>${t('formula')}</option>
+      </select>
+      <button data-act="fc-rebuild" class="px-3 py-1.5 rounded-lg bg-sky-600 text-white hover:opacity-90">${t('start')} / 🔄</button>
+      <div class="ml-auto flex items-center gap-3 text-xs text-slate-500">
+        <span>${t('fc_remaining')}: <b class="text-slate-700 dark:text-slate-200">${total}</b></span>
+        <span>${t('fc_today')}: 🟢${FCState.session.remember} 🟡${FCState.session.fuzzy} 🔴${FCState.session.forgot}</span>
+      </div>
+    </div>
+  </div>
+  ${cur ? `
+  <div class="max-w-2xl mx-auto">
+    <div class="fc-scene h-[380px] cursor-pointer select-none" data-act="fc-flip">
+      <div id="fc-card" class="fc-card ${FCState.flipped ? 'flipped' : ''} h-full rounded-2xl shadow-xl">
+        <div class="fc-face bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-2xl flex items-center justify-center p-6">${fcCardFront(cur)}</div>
+        <div class="fc-face fc-back bg-gradient-to-br from-sky-50 to-indigo-50 dark:from-slate-800 dark:to-slate-900 border border-slate-200 dark:border-slate-700 rounded-2xl p-6">${fcCardBack(cur)}</div>
+      </div>
+    </div>
+    ${FCState.flipped ? `
+    <div class="grid grid-cols-3 gap-3 mt-5">
+      <button data-act="fc-rate" data-r="forgot" class="py-3 rounded-xl bg-rose-500 text-white font-bold hover:bg-rose-600 transition">🔴 ${t('fc_forget')}</button>
+      <button data-act="fc-rate" data-r="fuzzy" class="py-3 rounded-xl bg-amber-500 text-white font-bold hover:bg-amber-600 transition">🟡 ${t('fc_fuzzy')}</button>
+      <button data-act="fc-rate" data-r="remember" class="py-3 rounded-xl bg-emerald-500 text-white font-bold hover:bg-emerald-600 transition">🟢 ${t('fc_remember')}</button>
+    </div>` : ''}
+    <div class="flex justify-center gap-2 mt-4">
+      <button data-act="fc-skip" class="text-sm px-4 py-2 rounded-lg bg-slate-200 dark:bg-slate-800 hover:opacity-80">⏭ ${t('fc_skip')}</button>
+      <button data-act="fc-next" class="text-sm px-4 py-2 rounded-lg bg-slate-200 dark:bg-slate-800 hover:opacity-80">→ ${t('fc_next')}</button>
+    </div>
+  </div>` : `<div class="text-center text-slate-400 py-20">${t('fc_empty')}</div>`}`;
+  renderMath(app);
+}
+
+/* ================= 視圖4：D3 知識圖譜 ================= */
+const GraphState = { ch: 'all', built: false };
+let graphSim: any = null;
+function renderGraphView(app: HTMLElement): void {
+  app.innerHTML = `
+  <div class="mb-3 flex flex-wrap items-center gap-2">
+    <h1 class="text-xl font-bold mr-2">🕸️ ${t('nav_graph')}</h1>
+    <select id="graph-ch" class="rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-1.5 text-sm">
+      <option value="all">${t('all')}</option>
+      ${KB!.chapters.map(c => `<option value="${esc(c.chapterId)}" ${GraphState.ch===c.chapterId?'selected':''}>${esc(chName(c))}</option>`).join('')}
+    </select>
+    <span class="text-xs text-slate-400">${t('graph_hint')}</span>
+    <div class="ml-auto flex flex-wrap items-center gap-2 text-[11px]">
+      <span class="flex items-center gap-1"><span class="w-3 h-3 rounded-full inline-block" style="background:#10b981"></span>${t('mastered')}</span>
+      <span class="flex items-center gap-1"><span class="w-3 h-3 rounded-full inline-block" style="background:#f59e0b"></span>${t('review')}</span>
+      <span class="flex items-center gap-1"><span class="w-3 h-3 rounded-full inline-block" style="background:#f43f5e"></span>${t('unmastered')}</span>
+      <span class="flex items-center gap-1"><span class="w-3 h-3 inline-block" style="background:#0ea5e9"></span>${t('concept')}</span>
+      <span class="flex items-center gap-1"><span class="w-3 h-3 inline-block" style="background:#8b5cf6"></span>${t('formula')}</span>
+      <span class="flex items-center gap-1"><span class="w-3 h-3 rounded-full inline-block" style="background:#94a3b8"></span>${t('question')}</span>
+      <span class="flex items-center gap-1"><span class="w-4 h-3 rounded inline-block" style="background:#334155"></span>${t('chapter')}</span>
+    </div>
+  </div>
+  <div id="graph-box" class="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-700 overflow-hidden" style="height:calc(100vh - 210px); min-height:480px;">
+    <svg id="graph-svg" class="w-full h-full"></svg>
+  </div>`;
+  buildGraph();
+}
+function buildGraph(): void {
+  const svgEl = document.getElementById('graph-svg');
+  if (!svgEl) return;
+  if (typeof d3 === 'undefined') { svgEl.outerHTML = '<div class="p-10 text-center text-slate-400">D3 CDN 未載入</div>'; return; }
+  if (graphSim) { graphSim.stop(); graphSim = null; }
+  // ---- 構建節點與連線 ----
+  const nodes: any[] = []; const links: any[] = [];
+  const chapters = GraphState.ch === 'all' ? KB!.chapters : KB!.chapters.filter(c => c.chapterId === GraphState.ch);
+  chapters.forEach(c => {
+    nodes.push({ id: c.chapterId, type: 'chapter', label: chName(c).replace(/^第.+章\s*/, ''), r: 26 });
+    (c.concepts || []).forEach(x => {
+      nodes.push({ id: x.conceptId, type: 'concept', label: cTitle(x).slice(0, 14), r: 9 });
+      links.push({ source: c.chapterId, target: x.conceptId });
+    });
+    (c.formulas || []).forEach(x => {
+      nodes.push({ id: x.formulaId, type: 'formula', label: fName(x).slice(0, 14), r: 9 });
+      links.push({ source: c.chapterId, target: x.formulaId });
+      (x.relatedConceptIds || []).forEach(cid => { if (CP.has(cid)) links.push({ source: x.formulaId, target: cid }); });
+    });
+  });
+  const qids = new Set<string>();
+  QB!.questions.forEach(q => {
+    if (GraphState.ch !== 'all' && q.chapterId !== GraphState.ch) return;
+    qids.add(q.questionId);
+    nodes.push({ id: q.questionId, type: 'question', label: q.questionId, r: 6 });
+    (q.relatedConceptIds || []).forEach(cid => { if (CP.has(cid)) links.push({ source: q.questionId, target: cid }); });
+    (q.relatedFormulaIds || []).forEach(fid => { if (FM.has(fid)) links.push({ source: q.questionId, target: fid }); });
+  });
+  // 去重連線 + 過濾端點缺失的連線（章節篩選時跨章關聯端點可能不在圖中）
+  const nodeIds = new Set(nodes.map(n => n.id));
+  const seen = new Set<string>();
+  const dedupLinks = links.filter(l => {
+    if (!nodeIds.has(l.source) || !nodeIds.has(l.target)) return false;
+    const k = [l.source, l.target].sort().join('→');
+    if (seen.has(k) || l.source === l.target) return false;
+    seen.add(k); return true;
+  });
+  const colorOf = (d: any): string => {
+    if (d.type === 'chapter') return '#334155';
+    if (d.type === 'concept' || d.type === 'formula') {
+      const m = MasteryStore.get(d.id);
+      return m === 'mastered' ? '#10b981' : m === 'review' ? '#f59e0b' : '#f43f5e';
+    }
+    // 題目節點依做題記錄著色
+    const log = QLogStore.all()[d.id];
+    if (log) return log.c > log.w ? '#0ea5e9' : '#fb923c';
+    return '#94a3b8';
+  };
+  const svg = d3.select(svgEl);
+  svg.selectAll('*').remove();
+  const box = (svgEl.parentElement as HTMLElement).getBoundingClientRect();
+  const width = box.width, height = box.height;
+  const g = svg.append('g');
+  // 縮放 + 平移
+  svg.call(d3.zoom().scaleExtent([0.15, 5]).on('zoom', (e: any) => g.attr('transform', e.transform)));
+  // 連線
+  const link = g.append('g').selectAll('line').data(dedupLinks).join('line')
+    .attr('stroke', '#cbd5e1').attr('stroke-opacity', 0.45)
+    .attr('stroke-width', 0.7);
+  // 節點（chapter 用 rect，其他用 circle）
+  const node = g.append('g').selectAll('g').data(nodes).join('g').attr('class', 'gnode');
+  node.filter((d: any) => d.type === 'chapter').append('rect')
+    .attr('width', 52).attr('height', 34).attr('x', -26).attr('y', -17).attr('rx', 8)
+    .attr('fill', '#334155').attr('stroke', '#0ea5e9').attr('stroke-width', 1.5);
+  node.filter((d: any) => d.type !== 'chapter').append('circle')
+    .attr('r', (d: any) => d.r).attr('fill', colorOf).attr('stroke', '#ffffff').attr('stroke-width', d => d.type === 'question' ? 0.6 : 1.2).attr('stroke-opacity', 0.7);
+  node.append('text')
+    .text((d: any) => d.type === 'question' ? '' : d.label)
+    .attr('font-size', d => d.type === 'chapter' ? 11 : 9)
+    .attr('fill', d => d.type === 'chapter' ? '#f8fafc' : (THEME === 'dark' ? '#94a3b8' : '#475569'))
+    .attr('text-anchor', 'middle').attr('dy', d => d.type === 'chapter' ? 4 : (d.type === 'formula' ? -13 : 14));
+  node.append('title').text((d: any) => d.id + ' ' + (d.label || ''));
+  // 交互：拖拽 + 點擊
+  node.call(d3.drag()
+    .on('start', (e: any, d: any) => { if (!e.active) graphSim.alphaTarget(0.25).restart(); d.fx = e.x; d.fy = e.y; })
+    .on('drag', (e: any, d: any) => { d.fx = e.x; d.fy = e.y; })
+    .on('end', (e: any, d: any) => { if (!e.active) graphSim.alphaTarget(0); d.fx = null; d.fy = null; }));
+  node.on('click', (e: any, d: any) => {
+    e.stopPropagation();
+    if (d.type === 'concept') openModal('concept', d.id);
+    else if (d.type === 'formula') openModal('formula', d.id);
+    else if (d.type === 'question') openModal('question', d.id);
+  });
+  // 力導向模擬
+  graphSim = d3.forceSimulation(nodes)
+    .force('link', d3.forceLink(dedupLinks).id((d: any) => d.id).distance((d: any) => (d.source.type === 'chapter' || d.target.type === 'chapter') ? 85 : 55).strength(0.35))
+    .force('charge', d3.forceManyBody().strength(-65))
+    .force('center', d3.forceCenter(width / 2, height / 2))
+    .force('collide', d3.forceCollide().radius((d: any) => d.r + 8))
+    .on('tick', () => {
+      link.attr('x1', (d: any) => d.source.x).attr('y1', (d: any) => d.source.y)
+          .attr('x2', (d: any) => d.target.x).attr('y2', (d: any) => d.target.y);
+      node.attr('transform', (d: any) => `translate(${d.x},${d.y})`);
+    });
+}
+
+/* ================= 視圖5：題庫 & 隨機考試 ================= */
+interface QuizCfg { chapter: string; diff: string; tag: string; count: number; minutes: number; }
+const QuizState = { mode: 'practice' as 'practice'|'exam', cfg: { chapter: 'all', diff: 'all', tag: 'all', count: 10, minutes: 60 } as QuizCfg };
+// 練習會話
+let PRAC: { qids: string[]; idx: number; answers: Record<string, string> } | null = null;
+// 模擬考試會話
+let EXAM: { qids: string[]; idx: number; answers: Record<string, string>; flags: Record<string, boolean>; remain: number; timer: number; submitted: boolean } | null = null;
+
+function allTags(): string[] {
+  const s = new Set<string>();
+  QB!.questions.forEach(q => (q.tags || []).forEach(x => s.add(x)));
+  return [...s].sort();
+}
+function pickQuestions(cfg: QuizCfg, pool?: Question[]): Question[] {
+  let list = (pool || QB!.questions).filter(q =>
+    (cfg.chapter === 'all' || q.chapterId === cfg.chapter) &&
+    (cfg.diff === 'all' || q.difficulty === cfg.diff) &&
+    (cfg.tag === 'all' || (q.tags || []).includes(cfg.tag)));
+  return shuffle(list).slice(0, cfg.count);
+}
+function renderQuizView(app: HTMLElement): void {
+  const modeTab = `
+  <div class="flex rounded-lg overflow-hidden border border-slate-300 dark:border-slate-700 mb-4 w-fit">
+    <button data-act="quiz-mode" data-m="practice" class="px-4 py-1.5 text-sm font-medium ${QuizState.mode==='practice'?'bg-sky-600 text-white':'bg-white dark:bg-slate-900'}">🎯 ${t('practice')}</button>
+    <button data-act="quiz-mode" data-m="exam" class="px-4 py-1.5 text-sm font-medium ${QuizState.mode==='exam'?'bg-sky-600 text-white':'bg-white dark:bg-slate-900'}">⏱ ${t('exam')}</button>
+  </div>`;
+  if (QuizState.mode === 'practice') {
+    if (!PRAC) { renderPracticeConfig(app, modeTab); return; }
+    renderPracticeSession(app, modeTab); return;
+  }
+  // 模擬考試
+  if (!EXAM) { renderExamConfig(app, modeTab); return; }
+  if (!EXAM.submitted) { renderExamSession(app, modeTab); return; }
+  renderExamReport(app);
+}
+function renderPracticeConfig(app: HTMLElement, modeTab: string): void {
+  const c = QuizState.cfg;
+  app.innerHTML = `
+  ${modeTab}
+  <div class="max-w-xl bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-700 p-5 space-y-4">
+    <h2 class="font-bold text-lg">🎯 ${t('practice')} · ${t('start')}</h2>
+    <div class="grid grid-cols-2 gap-3 text-sm">
+      <label class="space-y-1"><span class="text-slate-500">${t('filter_chapter')}</span>
+        <select id="cfg-ch" class="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2">
+          <option value="all">${t('all')}</option>
+          ${KB!.chapters.map(x => `<option value="${esc(x.chapterId)}" ${c.chapter===x.chapterId?'selected':''}>${esc(chName(x))}</option>`).join('')}
+        </select></label>
+      <label class="space-y-1"><span class="text-slate-500">${t('difficulty')}</span>
+        <select id="cfg-diff" class="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2">
+          <option value="all">${t('all')}</option>
+          ${['easy','medium','hard'].map(d => `<option value="${d}" ${c.diff===d?'selected':''}>${diffLabel(d)}</option>`).join('')}
+        </select></label>
+      <label class="space-y-1"><span class="text-slate-500">${t('tags')}</span>
+        <select id="cfg-tag" class="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2">
+          <option value="all">${t('all')}</option>
+          ${allTags().map(x => `<option value="${esc(x)}" ${c.tag===x?'selected':''}>${esc(x)}</option>`).join('')}
+        </select></label>
+      <label class="space-y-1"><span class="text-slate-500">${t('questionCount')}</span>
+        <input id="cfg-count" type="number" min="1" max="160" value="${c.count}" class="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2"></label>
+    </div>
+    <button data-act="prac-start" class="w-full py-2.5 rounded-xl bg-sky-600 text-white font-bold hover:bg-sky-700 transition">▶ ${t('start')}</button>
+  </div>`;
+}
+function renderPracticeSession(app: HTMLElement, modeTab: string): void {
+  const p = PRAC!;
+  const q = QS.get(p.qids[p.idx])!;
+  const selected = p.answers[q.questionId];
+  const revealed = !!selected;
+  const done = revealed;
+  app.innerHTML = `
+  ${modeTab}
+  <div class="max-w-3xl mx-auto">
+    <div class="flex items-center justify-between text-sm text-slate-500 mb-2">
+      <span>${p.idx + 1} / ${p.qids.length}</span>
+      <div class="w-1/2 h-1.5 bg-slate-200 dark:bg-slate-800 rounded-full overflow-hidden"><div class="h-full bg-sky-500" style="width:${(p.idx / p.qids.length) * 100}%"></div></div>
+      <button data-act="prac-quit" class="hover:underline">✕</button>
+    </div>
+    <div class="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-700 p-5" id="qbox">
+      ${questionDetailHTML(q.questionId, revealed, selected, true)}
+    </div>
+    <div class="flex justify-between mt-4">
+      <button data-act="prac-prev" class="px-4 py-2 rounded-lg bg-slate-200 dark:bg-slate-800 text-sm ${p.idx === 0 ? 'opacity-40 pointer-events-none' : ''}">← ${t('prev')}</button>
+      <button data-act="prac-next" class="px-5 py-2 rounded-lg bg-sky-600 text-white text-sm font-semibold hover:bg-sky-700 ${p.idx === p.qids.length - 1 ? '' : ''}">
+        ${p.idx === p.qids.length - 1 ? '✓ ' + t('submit') : t('next') + ' →'}
+      </button>
+    </div>
+  </div>`;
+  renderMath(app);
+}
+function renderExamConfig(app: HTMLElement, modeTab: string): void {
+  const c = QuizState.cfg;
+  app.innerHTML = `
+  ${modeTab}
+  <div class="max-w-xl bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-700 p-5 space-y-4">
+    <h2 class="font-bold text-lg">⏱ ${t('exam')} · ${t('start')}</h2>
+    <div class="grid grid-cols-2 gap-3 text-sm">
+      <label class="space-y-1"><span class="text-slate-500">${t('filter_chapter')}</span>
+        <select id="cfg-ch" class="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2">
+          <option value="all">${t('all')}</option>
+          ${KB!.chapters.map(x => `<option value="${esc(x.chapterId)}" ${c.chapter===x.chapterId?'selected':''}>${esc(chName(x))}</option>`).join('')}
+        </select></label>
+      <label class="space-y-1"><span class="text-slate-500">${t('questionCount')}</span>
+        <input id="cfg-count" type="number" min="5" max="160" value="${c.count}" class="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2"></label>
+      <label class="space-y-1 col-span-2"><span class="text-slate-500">${t('minutes')}</span>
+        <input id="cfg-min" type="number" min="5" max="300" value="${c.minutes}" class="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2"></label>
+    </div>
+    <button data-act="exam-start" class="w-full py-2.5 rounded-xl bg-indigo-600 text-white font-bold hover:bg-indigo-700 transition">⏱ ${t('start')}</button>
+  </div>`;
+}
+function renderExamSession(app: HTMLElement, modeTab: string): void {
+  const ex = EXAM!;
+  const q = QS.get(ex.qids[ex.idx])!;
+  const sel = ex.answers[q.questionId];
+  const answeredCount = Object.keys(ex.answers).length;
+  app.innerHTML = `
+  ${modeTab}
+  <div class="max-w-3xl mx-auto">
+    <div class="flex items-center justify-between mb-2">
+      <span class="text-sm text-slate-500">${ex.idx + 1} / ${ex.qids.length} · ${t('answerSheet')} ${answeredCount}/${ex.qids.length}</span>
+      <div class="flex items-center gap-2">
+        <span id="exam-timer" class="font-mono font-bold px-3 py-1 rounded-lg ${ex.remain < 60 ? 'bg-rose-100 text-rose-700 dark:bg-rose-900 dark:text-rose-300' : 'bg-slate-200 dark:bg-slate-800'}">⏱ ${fmtTime(ex.remain)}</span>
+        <button data-act="exam-submit" class="text-sm px-4 py-1.5 rounded-lg bg-emerald-600 text-white font-semibold hover:bg-emerald-700">${t('submit')}</button>
+      </div>
+    </div>
+    <div class="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-700 p-5">
+      <div class="flex justify-end mb-1">
+        <button data-act="exam-flag" data-id="${esc(q.questionId)}" class="text-xs px-2.5 py-1 rounded-lg ${ex.flags[q.questionId] ? 'bg-amber-500 text-white' : 'bg-slate-200 dark:bg-slate-800'}">🚩 ${t('flag')}</button>
+      </div>
+      <div class="text-sm text-slate-500 mb-2">${t('question')} ${ex.idx + 1} · ${diffLabel(q.difficulty)}</div>
+      <div class="math text-[15px] font-medium leading-relaxed whitespace-pre-wrap">${esc(qText(q))}</div>
+      <div class="space-y-2 mt-3">
+        ${['A','B','C','D'].map(k => {
+          const isSel = sel === k;
+          return `<button data-act="exam-answer" data-opt="${k}" class="w-full text-left flex gap-3 items-start border rounded-xl px-3.5 py-2.5 text-sm transition ${isSel ? 'border-sky-500 bg-sky-50 dark:bg-sky-900/30' : 'border-slate-200 dark:border-slate-700 hover:border-sky-300'}">
+            <span class="font-bold w-6 shrink-0">${k}</span><span class="flex-1">${esc(qOpt(q, k))}</span></button>`;
+        }).join('')}
+      </div>
+    </div>
+    <div class="grid grid-cols-10 gap-1.5 mt-4">
+      ${ex.qids.map((qid, i) => {
+        const st = ex.answers[qid] ? (ex.flags[qid] ? 'bg-amber-400 text-white' : 'bg-sky-500 text-white') : 'bg-slate-200 dark:bg-slate-800 text-slate-500';
+        return `<button data-act="exam-goto" data-i="${i}" class="h-8 rounded text-xs font-mono ${st} ${i === ex.idx ? 'ring-2 ring-indigo-500' : ''}">${i + 1}</button>`;
+      }).join('')}
+    </div>
+    <div class="flex justify-between mt-4">
+      <button data-act="exam-prev" class="px-4 py-2 rounded-lg bg-slate-200 dark:bg-slate-800 text-sm ${ex.idx === 0 ? 'opacity-40 pointer-events-none' : ''}">← ${t('prev')}</button>
+      <button data-act="exam-next" class="px-4 py-2 rounded-lg bg-slate-200 dark:bg-slate-800 text-sm ${ex.idx === ex.qids.length - 1 ? 'opacity-40 pointer-events-none' : ''}">${t('next')} →</button>
+    </div>
+  </div>`;
+  renderMath(app);
+}
+function examTick(): void {
+  if (!EXAM || EXAM.submitted) return;
+  EXAM.remain--;
+  const el = document.getElementById('exam-timer');
+  if (el) { el.textContent = '⏱ ' + fmtTime(Math.max(EXAM.remain, 0)); if (EXAM.remain < 60) el.className = 'font-mono font-bold px-3 py-1 rounded-lg bg-rose-100 text-rose-700 dark:bg-rose-900 dark:text-rose-300'; }
+  if (EXAM.remain <= 0) { toast(t('exam_timeup'), 'error'); submitExam(); }
+}
+function submitExam(): void {
+  if (!EXAM || EXAM.submitted) return;
+  EXAM.submitted = true;
+  clearInterval(EXAM.timer);
+  // 記錄做題與錯題
+  EXAM.qids.forEach(qid => {
+    const q = QS.get(qid)!;
+    const sel = EXAM!.answers[qid];
+    const correct = sel === q.correctAnswer;
+    QLogStore.record(qid, correct);
+    if (!correct) WrongStore.add(qid);
+  });
+  renderApp();
+  window.scrollTo({ top: 0 });
+}
+function renderExamReport(app: HTMLElement): void {
+  const ex = EXAM!;
+  let correct = 0;
+  const rows = ex.qids.map((qid, i) => {
+    const q = QS.get(qid)!;
+    const sel = ex.answers[qid] || '—';
+    const ok = sel === q.correctAnswer;
+    if (ok) correct++;
+    return { qid, q, sel, ok, i };
+  });
+  const pct = Math.round((correct / ex.qids.length) * 100);
+  const used = QuizState.cfg.minutes * 60 - ex.remain;
+  app.innerHTML = `
+  <div class="max-w-3xl mx-auto">
+    <h1 class="text-xl font-bold mb-4">📊 ${t('scoreReport')}</h1>
+    <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">
+      ${[
+        { l: t('score'), v: `${correct}/${ex.qids.length}`, c: 'bg-sky-600' },
+        { l: t('accuracy'), v: pct + '%', c: pct >= 60 ? 'bg-emerald-600' : 'bg-rose-600' },
+        { l: t('wrongCount'), v: String(ex.qids.length - correct), c: 'bg-amber-600' },
+        { l: t('timer'), v: fmtTime(used), c: 'bg-slate-600' },
+      ].map(x => `<div class="rounded-xl ${x.c} text-white p-4"><div class="text-xs opacity-80">${x.l}</div><div class="text-2xl font-extrabold mt-1">${x.v}</div></div>`).join('')}
+    </div>
+    <div class="h-3 rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden mb-6"><div class="h-full ${pct >= 60 ? 'bg-emerald-500' : 'bg-rose-500'}" style="width:${pct}%"></div></div>
+    <div class="font-bold mb-2">${t('exam_review')}</div>
+    <div class="space-y-2">
+      ${rows.map(r => `
+        <button data-act="open" data-type="question" data-id="${r.qid}" class="w-full text-left flex items-center gap-3 px-4 py-3 rounded-xl border ${r.ok ? 'border-emerald-200 bg-emerald-50/60 dark:border-emerald-900 dark:bg-emerald-900/20' : 'border-rose-200 bg-rose-50/60 dark:border-rose-900 dark:bg-rose-900/20'} hover:shadow-sm">
+          <span class="font-mono text-xs text-slate-400 w-12">${esc(r.qid)}</span>
+          <span class="flex-1 text-sm truncate">${esc(qText(r.q).slice(0, 80))}…</span>
+          <span class="text-xs ${r.ok ? 'text-emerald-600' : 'text-rose-600'} font-semibold">${t('yourAns')}: ${r.sel} · ${t('correct')}: ${r.q.correctAnswer}</span>
+        </button>`).join('')}
+    </div>
+    <div class="flex gap-3 mt-6">
+      <button data-act="exam-retake" class="px-5 py-2.5 rounded-xl bg-indigo-600 text-white font-semibold hover:bg-indigo-700">🔄 ${t('retest')}</button>
+      <button data-act="exam-exit" class="px-5 py-2.5 rounded-xl bg-slate-200 dark:bg-slate-800 font-semibold hover:opacity-80">${t('back')}</button>
+    </div>
+  </div>`;
+}
+
+/* ================= 視圖6：錯題本 ================= */
+const WrongState = { redo: null as null | { qids: string[]; idx: number; answers: Record<string, string> } };
+function renderWrongView(app: HTMLElement): void {
+  const wrong = WrongStore.all();
+  const qids = Object.keys(wrong).filter(id => QS.has(id)).sort();
+  // 重做模式
+  if (WrongState.redo) {
+    const r = WrongState.redo;
+    if (r.idx >= r.qids.length) {
+      app.innerHTML = `<div class="max-w-xl mx-auto text-center py-20"><div class="text-5xl mb-4">🎉</div><div class="text-lg font-bold mb-6">${t('redo_done')}</div>
+        <button data-act="wrong-exit" class="px-5 py-2.5 rounded-xl bg-sky-600 text-white font-semibold">${t('back')}</button></div>`;
+      return;
+    }
+    const qid = r.qids[r.idx];
+    const q = QS.get(qid)!;
+    const selected = r.answers[qid];
+    const revealed = !!selected;
+    app.innerHTML = `
+    <div class="max-w-3xl mx-auto">
+      <div class="flex items-center justify-between text-sm text-slate-500 mb-2"><span>⭐ ${t('redoWrong')} · ${r.idx + 1} / ${r.qids.length}</span><button data-act="wrong-exit" class="hover:underline">✕</button></div>
+      <div class="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-700 p-5">${questionDetailHTML(qid, revealed, selected, true)}</div>
+      <div class="flex justify-between mt-4">
+        <span></span>
+        <button data-act="wrong-next" class="px-5 py-2 rounded-lg bg-sky-600 text-white text-sm font-semibold hover:bg-sky-700">${t('next')} →</button>
+      </div>
+    </div>`;
+    renderMath(app);
+    return;
+  }
+  app.innerHTML = `
+  <div class="mb-4 flex flex-wrap items-center gap-2">
+    <h1 class="text-xl font-bold mr-2">⭐ ${t('nav_wrong')} <span class="text-sm font-normal text-slate-400">(${qids.length})</span></h1>
+    <div class="ml-auto flex flex-wrap gap-2">
+      <button data-act="wrong-redo" class="text-sm px-4 py-1.5 rounded-lg bg-rose-500 text-white font-semibold hover:bg-rose-600 ${qids.length ? '' : 'opacity-40 pointer-events-none'}">▶ ${t('redoWrong')}</button>
+      <button data-act="wrong-export-md" class="text-sm px-4 py-1.5 rounded-lg bg-slate-200 dark:bg-slate-800 hover:opacity-80 ${qids.length ? '' : 'opacity-40 pointer-events-none'}">📄 ${t('exportMD')}</button>
+      <button data-act="wrong-export-pdf" class="text-sm px-4 py-1.5 rounded-lg bg-slate-200 dark:bg-slate-800 hover:opacity-80 ${qids.length ? '' : 'opacity-40 pointer-events-none'}">📑 ${t('exportPDF')}</button>
+      <button data-act="wrong-clear" class="text-sm px-4 py-1.5 rounded-lg text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-900/30 ${qids.length ? '' : 'opacity-40 pointer-events-none'}">🗑 ${t('clearWrong')}</button>
+    </div>
+  </div>
+  ${qids.length ? `<div class="space-y-2.5">${qids.map(qid => {
+    const q = QS.get(qid)!;
+    const w = wrong[qid];
+    return `
+    <div class="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-700 p-4 flex items-start gap-3">
+      <div class="flex-1 min-w-0">
+        <div class="flex items-center gap-2 text-xs text-slate-400 mb-1">
+          <span class="font-mono">${esc(qid)}</span>
+          <span>${CH.has(q.chapterId) ? esc(chName(CH.get(q.chapterId)!)) : ''}</span>
+          <span>${diffLabel(q.difficulty)}</span>
+          <span>${LANG === 'zh' ? '錯' : 'wrong'} ×${w.n}</span>
+        </div>
+        <button class="text-sm text-left hover:underline line-clamp-2" data-act="open" data-type="question" data-id="${esc(qid)}">${esc(qText(q).slice(0, 120))}…</button>
+        <div class="mt-1.5 text-xs"><span class="text-emerald-600 font-semibold">${t('correct')}: ${q.correctAnswer}</span></div>
+      </div>
+      <button data-act="wrong-remove" data-id="${esc(qid)}" class="text-xs px-2.5 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 hover:opacity-80 shrink-0">✕ ${t('removeWrong')}</button>
+    </div>`;}).join('')}</div>`
+  : `<div class="text-center text-slate-400 py-20">${t('emptyWrong')}</div>`}`;
+}
+
+/* ================= 視圖7：掌握度統計面板 ================= */
+const StatsState = { status: 'all' as 'all' | Mastery };
+function renderStatsView(app: HTMLElement): void {
+  const chapters = KB!.chapters;
+  const mAll = MasteryStore.all();
+  const qlog = QLogStore.all();
+  const fcHist = FlashStore.all();
+  // 知識點掌握統計
+  let mMastered = 0, mReview = 0, mUn = 0;
+  const perCh: { c: Chapter; mastered: number; review: number; un: number; total: number }[] = [];
+  chapters.forEach(c => {
+    const items = [...(c.concepts || []).map(x => x.conceptId), ...(c.formulas || []).map(x => x.formulaId)];
+    let mastered = 0, review = 0, un = 0;
+    items.forEach(id => { const m = mAll[id] || 'unmastered'; if (m === 'mastered') mastered++; else if (m === 'review') review++; else un++; });
+    mMastered += mastered; mReview += review; mUn += un;
+    perCh.push({ c, mastered, review, un, total: items.length });
+  });
+  const totalItems = mMastered + mReview + mUn;
+  const pct = (n: number) => totalItems ? Math.round((n / totalItems) * 100) : 0;
+  const totalDone = QLogStore.totalDone(), totalCorrect = QLogStore.totalCorrect();
+  const acc = totalDone ? Math.round((totalCorrect / totalDone) * 100) : 0;
+  const fcTotal = Object.values(fcHist).reduce((s, x) => s + x.total, 0);
+  // 每章做題正確率
+  const accRows = chapters.map(c => {
+    const qs = QB!.questions.filter(q => q.chapterId === c.chapterId);
+    let done = 0, corr = 0;
+    qs.forEach(q => { const l = qlog[q.questionId]; if (l) { done += l.c + l.w; corr += l.c; } });
+    return { c, done, corr, acc: done ? Math.round((corr / done) * 100) : null };
+  });
+  const statFilter = StatsState;
+  app.innerHTML = `
+  <div class="space-y-6">
+    <h1 class="text-xl font-bold">📊 ${t('nav_stats')}</h1>
+    <!-- 知識點掌握度 -->
+    <section class="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-700 p-5">
+      <div class="font-bold mb-3">🎯 ${t('stats_kp')}</div>
+      <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
+        ${[
+          { l: t('kp_total'), v: totalItems, cls: 'bg-slate-600' },
+          { l: t('mastered'), v: mMastered, cls: 'bg-emerald-600' },
+          { l: t('review'), v: mReview, cls: 'bg-amber-500' },
+          { l: t('unmastered'), v: mUn, cls: 'bg-rose-500' },
+        ].map(x => `<div class="rounded-xl ${x.cls} text-white p-4"><div class="text-xs opacity-80">${x.l}</div><div class="text-2xl font-extrabold mt-1">${x.v}</div></div>`).join('')}
+      </div>
+      <div class="h-4 rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden flex">
+        <div class="h-full bg-emerald-500" style="width:${pct(mMastered)}%"></div>
+        <div class="h-full bg-amber-500" style="width:${pct(mReview)}%"></div>
+        <div class="h-full bg-rose-500" style="width:${pct(mUn)}%"></div>
+      </div>
+      <div class="mt-5 space-y-3">
+        ${perCh.map(r => `
+        <div>
+          <div class="flex justify-between text-xs mb-1"><span class="font-medium">${esc(chName(r.c))}</span>
+            <span class="text-slate-400">🟢${r.mastered} 🟡${r.review} 🔴${r.un} / ${r.total}</span></div>
+          <div class="h-3 rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden flex">
+            <div class="h-full bg-emerald-500" style="width:${r.total ? (r.mastered / r.total) * 100 : 0}%"></div>
+            <div class="h-full bg-amber-500" style="width:${r.total ? (r.review / r.total) * 100 : 0}%"></div>
+            <div class="h-full bg-rose-500" style="width:${r.total ? (r.un / r.total) * 100 : 0}%"></div>
+          </div>
+        </div>`).join('')}
+      </div>
+    </section>
+    <!-- 做題統計 -->
+    <section class="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-700 p-5">
+      <div class="font-bold mb-3">📝 ${t('stats_q')}</div>
+      <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        ${[
+          { l: t('doneCount'), v: totalDone, cls: 'bg-sky-600' },
+          { l: t('accuracy'), v: acc + '%', cls: acc >= 60 ? 'bg-emerald-600' : 'bg-rose-600' },
+          { l: t('wrongCount'), v: WrongStore.count(), cls: 'bg-amber-600' },
+          { l: t('fc_total'), v: fcTotal, cls: 'bg-violet-600' },
+        ].map(x => `<div class="rounded-xl ${x.cls} text-white p-4"><div class="text-xs opacity-80">${x.l}</div><div class="text-2xl font-extrabold mt-1">${x.v}</div></div>`).join('')}
+      </div>
+      <div class="mt-5 space-y-3">
+        ${accRows.map(r => `
+        <div>
+          <div class="flex justify-between text-xs mb-1"><span class="font-medium">${esc(chName(r.c))}</span>
+            <span class="text-slate-400">${r.done ? `${t('doneCount')} ${r.done} · ${t('accuracy')} ${r.acc}%` : t('no_data')}</span></div>
+          <div class="h-3 rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden">
+            <div class="h-full ${r.acc !== null && r.acc >= 60 ? 'bg-emerald-500' : 'bg-rose-500'}" style="width:${r.acc || 0}%"></div>
+          </div>
+        </div>`).join('')}
+      </div>
+    </section>
+    <!-- 按掌握狀態過濾知識庫 -->
+    <section class="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-700 p-5">
+      <div class="font-bold mb-3">🔎 ${t('filter_list')}</div>
+      <div class="flex flex-wrap gap-2 mb-3 text-sm" id="stats-filter">
+        ${(['all','mastered','review','unmastered'] as const).map(s =>
+          `<button data-act="stats-filter" data-s="${s}" class="px-3 py-1.5 rounded-lg border ${statFilter.status===s?'bg-slate-700 dark:bg-slate-300 text-white dark:text-slate-900 font-semibold':'border-slate-300 dark:border-slate-700'}">${s==='all'?t('all'):masteryLabel(s)}</button>`).join('')}
+      </div>
+      <div class="grid sm:grid-cols-2 gap-2 max-h-96 overflow-y-auto">
+        ${(function() {
+          const out: string[] = [];
+          chapters.forEach(c => {
+            (c.concepts || []).forEach(x => {
+              const m = mAll[x.conceptId] || 'unmastered';
+              if (statFilter.status === 'all' || m === statFilter.status)
+                out.push(`<button class="text-left text-sm px-3 py-2 rounded-lg bg-slate-50 dark:bg-slate-800 hover:ring-1 ring-sky-400" data-act="open" data-type="concept" data-id="${esc(x.conceptId)}"><span class="text-emerald-600 mr-1">●</span>${esc(cTitle(x))}</button>`);
+            });
+            (c.formulas || []).forEach(x => {
+              const m = mAll[x.formulaId] || 'unmastered';
+              if (statFilter.status === 'all' || m === statFilter.status)
+                out.push(`<button class="text-left text-sm px-3 py-2 rounded-lg bg-slate-50 dark:bg-slate-800 hover:ring-1 ring-sky-400" data-act="open" data-type="formula" data-id="${esc(x.formulaId)}"><span class="text-violet-600 mr-1">◆</span>${esc(fName(x))}</button>`);
+            });
+          });
+          return out.length ? out.join('') : `<div class="text-slate-400 text-sm p-4">${t('noMatch')}</div>`;
+        })()}
+      </div>
+    </section>
+  </div>`;
+}
+
+/* ================= 錯題匯出：Markdown 與 PDF ================= */
+function buildWrongExportHTML(): string {
+  const wrong = WrongStore.all();
+  const qids = Object.keys(wrong).filter(id => QS.has(id)).sort();
+  const itemHTML = (qid: string): string => {
+    const q = QS.get(qid)!;
+    const opts = ['A','B','C','D'].map(k => `<p style="margin:2px 0"><b>${k}.</b> ${esc(qOpt(q, k))}</p>`).join('');
+    return `
+    <div style="page-break-inside:avoid; margin-bottom:18px; border-bottom:1px solid #ddd; padding-bottom:12px;">
+      <p style="font-size:12px;color:#64748b">${esc(q.questionId)} · ${esc(q.chapterId)} · ${q.difficulty} · ${esc(qTags(q).join(' / '))}</p>
+      <p style="font-weight:600; margin:6px 0"><b>${esc(q.questionId)}.</b> ${esc(q.questionText)}</p>
+      <p style="font-size:12px;color:#334155;font-style:italic">${esc(q.questionTextEn)}</p>
+      ${opts}
+      <p style="margin:6px 0"><b style="color:#059669">${t('correct')}: ${q.correctAnswer}</b></p>
+      <p style="font-size:13px; background:#f1f5f9; padding:8px; border-radius:6px; white-space:pre-wrap"><b>解析：</b>${esc(q.explanation)}</p>
+      <p style="font-size:12px; color:#475569; white-space:pre-wrap"><b>Explanation:</b> ${esc(q.explanationEn)}</p>
+    </div>`;
+  };
+  return `
+  <div style="font-family:'Microsoft YaHei',Arial,sans-serif; padding:24px;">
+    <h1 style="font-size:22px; margin-bottom:4px;">FRM Part II 錯題本 / Wrong Question Book</h1>
+    <p style="color:#64748b; font-size:13px; margin-bottom:16px">${new Date().toLocaleString()} · 共 ${qids.length} 題 / ${qids.length} questions</p>
+    ${qids.map(itemHTML).join('')}
+  </div>`;
+}
+function buildWrongExportMD(): string {
+  const wrong = WrongStore.all();
+  const qids = Object.keys(wrong).filter(id => QS.has(id)).sort();
+  const lines: string[] = [];
+  lines.push(`# FRM Part II 錯題本 / Wrong Question Book`);
+  lines.push('');
+  lines.push(`> 匯出時間 Exported: ${new Date().toLocaleString()} · 共 ${qids.length} 題`);
+  lines.push('');
+  qids.forEach(qid => {
+    const q = QS.get(qid)!;
+    lines.push(`---`);
+    lines.push(`## ${q.questionId} · ${q.chapterId} · ${q.difficulty}`);
+    lines.push(`**Tags:** ${(q.tags || []).join(' / ')}`);
+    lines.push('');
+    lines.push(`**題幹 / Question:** ${q.questionText}`);
+    lines.push('');
+    lines.push(`*${q.questionTextEn}*`);
+    lines.push('');
+    ['A','B','C','D'].forEach(k => { lines.push(`- **${k}.** ${q.options?.[k] || ''} / ${q.optionsEn?.[k] || ''}`); });
+    lines.push('');
+    lines.push(`**✅ 正確答案 / Correct Answer: ${q.correctAnswer}**`);
+    lines.push('');
+    lines.push(`**解析 / Explanation (中文):**`);
+    lines.push(`> ${q.explanation.replace(/\n/g, '\n> ')}`);
+    lines.push('');
+    lines.push(`**Explanation (EN):**`);
+    lines.push(`> ${q.explanationEn.replace(/\n/g, '\n> ')}`);
+    lines.push('');
+  });
+  return lines.join('\n');
+}
+function downloadText(filename: string, text: string): void {
+  const blob = new Blob([text], { type: 'text/markdown;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 3000);
+}
+function exportWrongMD(): void {
+  if (!WrongStore.count()) { toast(t('export_none'), 'error'); return; }
+  const md = buildWrongExportMD();
+  downloadText(`FRM2_wrongbook_${new Date().toISOString().slice(0, 10)}.md`, md);
+  toast(t('export_ok') + ' (.md)');
+}
+function exportWrongPDF(): void {
+  if (!WrongStore.count()) { toast(t('export_none'), 'error'); return; }
+  if (typeof html2pdf === 'undefined') { toast('html2pdf CDN 未載入', 'error'); return; }
+  const root = document.getElementById('pdf-root')!;
+  root.innerHTML = buildWrongExportHTML();
+  renderMath(root);
+  toast('PDF 生成中…', 'info');
+  html2pdf().set({
+    margin: [10, 10, 10, 10],
+    filename: `FRM2_wrongbook_${new Date().toISOString().slice(0, 10)}.pdf`,
+    image: { type: 'jpeg', quality: 0.95 },
+    html2canvas: { scale: 2, useCORS: true },
+    jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
+    pagebreak: { mode: ['css', 'legacy'] },
+  }).from(root.firstElementChild as HTMLElement).save()
+    .then(() => { toast(t('export_ok') + ' (.pdf)'); root.innerHTML = ''; })
+    .catch(() => { toast('PDF 匯出失敗', 'error'); root.innerHTML = ''; });
+}
+
+/* ================= 資料載入（fetch + 檔案選擇器 + LocalStorage 快取） ================= */
+function applyData(kb: KB, qb: QB): boolean {
+  if (!kb || !Array.isArray(kb.chapters) || !kb.chapters.length) { toast(t('kb_bad'), 'error'); return false; }
+  if (!qb || !Array.isArray(qb.questions) || !qb.questions.length) { toast(t('qb_bad'), 'error'); return false; }
+  KB = kb; QB = qb;
+  lsSet(K.kb, kb); lsSet(K.qb, qb);           // 快取，供 file:// 離線使用
+  rebuildIndex(); READY = true;
+  fcBuildDeck();
+  return true;
+}
+async function tryFetchData(): Promise<boolean> {
+  try {
+    const [kbRes, qbRes] = await Promise.all([
+      fetch('./knowledge_base.json', { cache: 'no-store' }),
+      fetch('./question_bank.json', { cache: 'no-store' }),
+    ]);
+    if (!kbRes.ok || !qbRes.ok) return false;
+    const kb = await kbRes.json(); const qb = await qbRes.json();
+    return applyData(kb, qb);
+  } catch { return false; }   // file:// 協議下 fetch 通常被瀏覽器阻止 → 走快取/檔案選擇器
+}
+function loadFromCache(): boolean {
+  const kb = lsGet<KB | null>(K.kb, null); const qb = lsGet<QB | null>(K.qb, null);
+  if (kb && qb) return applyData(kb, qb);
+  return false;
+}
+/** 讀取使用者選擇的 JSON 檔案（更新資料按鈕與首次設定共用） */
+function pickFiles(): void {
+  const input = document.createElement('input');
+  input.type = 'file'; input.accept = '.json'; input.multiple = true;
+  input.onchange = async () => {
+    const files = Array.from(input.files || []);
+    if (files.length < 2) { toast(t('both_needed'), 'error'); return; }
+    const read = (f: File) => new Promise<string>(res => { const r = new FileReader(); r.onload = () => res(String(r.result)); r.readAsText(f, 'utf-8'); });
+    try {
+      let kb: KB | null = null, qb: QB | null = null;
+      for (const f of files) {
+        const text = await read(f); const obj = JSON.parse(text);
+        if (obj && Array.isArray(obj.chapters)) kb = obj as KB;
+        else if (obj && Array.isArray(obj.questions)) qb = obj as QB;
+      }
+      if (!kb || !qb) { toast(t('both_needed'), 'error'); return; }
+      if (applyData(kb, qb)) {
+        toast(t('load_ok'));
+        document.getElementById('setup-root')!.classList.add('hidden');
+        closeAllModals(); renderApp();
+      }
+    } catch (e) { toast('JSON 解析失敗：' + (e as Error).message, 'error'); }
+  };
+  input.click();
+}
+/** 首次設定覆蓋層（fetch 失敗且無快取時顯示） */
+function showSetup(): void {
+  const root = document.getElementById('setup-root')!;
+  root.classList.remove('hidden');
+  root.innerHTML = `
+  <div class="w-full h-full bg-slate-100 dark:bg-slate-950 flex items-center justify-center p-6">
+    <div class="max-w-lg w-full bg-white dark:bg-slate-900 rounded-2xl shadow-2xl p-7 text-center">
+      <div class="text-5xl mb-3">🎓</div>
+      <h1 class="text-xl font-extrabold mb-1">FRM Part II 備考複習系統</h1>
+      <p class="text-sm text-slate-500 mb-5">FRM Part II Study System</p>
+      <div class="text-sm text-left bg-amber-50 dark:bg-amber-900/30 border border-amber-200 dark:border-amber-800 rounded-xl p-4 mb-5">
+        ${t('data_load_fail')}
+      </div>
+      <div class="space-y-3">
+        <button data-act="pick-files" class="w-full py-3 rounded-xl bg-sky-600 text-white font-bold hover:bg-sky-700">📂 ${t('pick_kb')} + ${t('pick_qb')}</button>
+        <button data-act="retry-fetch" class="w-full py-2.5 rounded-xl bg-slate-200 dark:bg-slate-800 text-sm hover:opacity-80">🔄 ${LANG === 'zh' ? '重新嘗試自動讀取' : 'Retry auto-load'}</button>
+      </div>
+      <p class="text-xs text-slate-400 mt-5">${LANG === 'zh'
+        ? '提示：若希望程式每次自動讀取JSON，可在資料夾內啟動本機伺服器（如 python -m http.server）後瀏覽 http://localhost:8000'
+        : 'Tip: to auto-load JSON every time, serve the folder (e.g. python -m http.server) and open http://localhost:8000'}</p>
+    </div>
+  </div>`;
+}
+
+/* ================= 主題與語言 ================= */
+function applyTheme(): void {
+  document.documentElement.classList.toggle('dark', THEME === 'dark');
+}
+function toggleLang(): void {
+  LANG = LANG === 'zh' ? 'en' : 'zh';
+  lsSet(K.lang, LANG);
+  renderApp();
+  if (modalStack.length) renderModal();
+}
+function toggleTheme(): void {
+  THEME = THEME === 'dark' ? 'light' : 'dark';
+  lsSet(K.theme, THEME);
+  applyTheme(); renderApp();
+  if (modalStack.length) renderModal();
+}
+
+/* ================= 全域事件委派 ================= */
+document.addEventListener('click', (e: Event) => {
+  const target = e.target as HTMLElement;
+  const el = target.closest('[data-act]') as HTMLElement | null;
+  // 彈窗遮罩關閉
+  if (target.getAttribute && target.getAttribute('data-act') === 'modal-backdrop') { closeAllModals(); return; }
+  if (!el) return;
+  const act = el.getAttribute('data-act')!;
+  const id = el.getAttribute('data-id') || '';
+  switch (act) {
+    case 'nav': navigate(el.getAttribute('data-v') as ViewKey); break;
+    case 'lang': toggleLang(); break;
+    case 'theme': toggleTheme(); break;
+    case 'help': openModal('help', 'help'); break;
+    case 'update-data': pickFiles(); break;
+    case 'pick-files': pickFiles(); break;
+    case 'retry-fetch': tryFetchData().then(ok => { if (ok) { toast(t('load_ok')); document.getElementById('setup-root')!.classList.add('hidden'); renderApp(); } else toast(t('data_load_fail'), 'error'); }); break;
+    case 'modal-close': closeAllModals(); break;
+    case 'modal-back': closeModal(); break;
+    case 'open': openModal(el.getAttribute('data-type') as any, id); break;
+    case 'mastery': MasteryStore.set(id, el.getAttribute('data-m') as Mastery); refreshMasteryGroups(id); break;
+    case 'fav': {
+      if (WrongStore.has(id)) { WrongStore.remove(id); toast(t('removeWrong')); }
+      else { WrongStore.add(id); toast(t('favDone')); }
+      renderApp(); if (modalStack.length) renderModal(); break;
+    }
+    case 'practice-one': {
+      // 單題練習
+      QuizState.mode = 'practice';
+      PRAC = { qids: [id], idx: 0, answers: {} };
+      navigate('quiz'); break;
+    }
+    // ---- 知識庫視圖 ----
+    case 'kb-ch': KBState.ch = el.getAttribute('data-ch')!; renderApp(); break;
+    case 'kb-sub': KBState.sub = el.getAttribute('data-sub') as any; renderApp(); break;
+    case 'kb-status': KBState.status = el.getAttribute('data-s') as any; renderApp(); break;
+    case 'kb-kw-clear': KBState.kw = ''; renderApp(); break;
+    // ---- 閃卡 ----
+    case 'fc-flip': { FCState.flipped = !FCState.flipped; renderApp(); break; }
+    case 'fc-rate': {
+      const r = el.getAttribute('data-r') as FCRating;
+      const cur = FCState.cur;
+      if (cur) {
+        FlashStore.rate(cur, r);
+        FCState.session[r]++;
+        // 評分同步更新掌握狀態（Anki聯動）
+        MasteryStore.set(cur, r === 'remember' ? 'mastered' : r === 'fuzzy' ? 'review' : 'unmastered');
+        fcStateExt.lastId = cur;     // 避免下一張重複
+        FCState.cur = fcNextId();    // 抽下一張
+        FCState.flipped = false;
+      }
+      renderApp(); break;
+    }
+    case 'fc-next': { FCState.cur = fcNextId(); FCState.flipped = false; renderApp(); break; }
+    case 'fc-skip': { fcStateExt.lastId = FCState.cur || fcStateExt.lastId; FCState.cur = fcNextId(); FCState.flipped = false; renderApp(); break; }
+    case 'fc-rebuild': fcBuildDeck(); renderApp(); break;
+    // ---- 圖譜 ----
+    case 'graph-reset': buildGraph(); break;
+    // ---- 題庫/考試 ----
+    case 'quiz-mode': if (EXAM && EXAM.timer) clearInterval(EXAM.timer); QuizState.mode = el.getAttribute('data-m') as any; PRAC = null; EXAM = null; renderApp(); break;
+    case 'prac-start': {
+      QuizState.cfg.chapter = (document.getElementById('cfg-ch') as HTMLSelectElement).value;
+      QuizState.cfg.diff = (document.getElementById('cfg-diff') as HTMLSelectElement).value;
+      QuizState.cfg.tag = (document.getElementById('cfg-tag') as HTMLSelectElement).value;
+      QuizState.cfg.count = Math.max(1, Math.min(160, parseInt((document.getElementById('cfg-count') as HTMLInputElement).value) || 10));
+      const picked = pickQuestions(QuizState.cfg);
+      if (!picked.length) { toast(t('noMatch'), 'error'); break; }
+      PRAC = { qids: picked.map(q => q.questionId), idx: 0, answers: {} };
+      renderApp(); break;
+    }
+    case 'prac-answer': {
+      // 上下文感知：優先練習會話，其次錯題重做會話
+      const opt = el.getAttribute('data-opt')!;
+      if (PRAC) {
+        const qid = PRAC.qids[PRAC.idx];
+        if (PRAC.answers[qid]) break;           // 已作答不可改
+        PRAC.answers[qid] = opt;
+        const q = QS.get(qid)!;
+        const ok = opt === q.correctAnswer;
+        QLogStore.record(qid, ok);
+        if (!ok) WrongStore.add(qid);
+        renderApp(); break;
+      }
+      if (WrongState.redo) {
+        const r = WrongState.redo;
+        const qid = r.qids[r.idx];
+        if (r.answers[qid]) break;
+        r.answers[qid] = opt;
+        renderApp(); break;
+      }
+      break;
+    }
+    case 'prac-next': {
+      if (!PRAC) break;
+      if (PRAC.idx < PRAC.qids.length - 1) { PRAC.idx++; renderApp(); }
+      else { PRAC = null; renderApp(); }        // 完成返回設定
+      break;
+    }
+    case 'prac-prev': if (PRAC && PRAC.idx > 0) { PRAC.idx--; renderApp(); } break;
+    case 'prac-quit': PRAC = null; renderApp(); break;
+    case 'exam-start': {
+      QuizState.cfg.chapter = (document.getElementById('cfg-ch') as HTMLSelectElement).value;
+      QuizState.cfg.count = Math.max(5, Math.min(160, parseInt((document.getElementById('cfg-count') as HTMLInputElement).value) || 40));
+      QuizState.cfg.minutes = Math.max(5, Math.min(300, parseInt((document.getElementById('cfg-min') as HTMLInputElement).value) || 60));
+      const picked = pickQuestions(QuizState.cfg);
+      if (!picked.length) { toast(t('noMatch'), 'error'); break; }
+      EXAM = { qids: picked.map(q => q.questionId), idx: 0, answers: {}, flags: {}, remain: QuizState.cfg.minutes * 60, timer: 0, submitted: false };
+      EXAM.timer = window.setInterval(examTick, 1000);
+      renderApp(); break;
+    }
+    case 'exam-answer': {
+      if (!EXAM || EXAM.submitted) break;
+      const qid = EXAM.qids[EXAM.idx];
+      EXAM.answers[qid] = el.getAttribute('data-opt')!;
+      renderApp(); break;
+    }
+    case 'exam-flag': if (EXAM) { EXAM.flags[id] = !EXAM.flags[id]; renderApp(); } break;
+    case 'exam-goto': if (EXAM) { EXAM.idx = parseInt(el.getAttribute('data-i')!); renderApp(); } break;
+    case 'exam-next': if (EXAM && EXAM.idx < EXAM.qids.length - 1) { EXAM.idx++; renderApp(); } break;
+    case 'exam-prev': if (EXAM && EXAM.idx > 0) { EXAM.idx--; renderApp(); } break;
+    case 'exam-submit': if (EXAM && confirm(t('confirm_submit'))) submitExam(); break;
+    case 'exam-retake': if (EXAM && EXAM.timer) clearInterval(EXAM.timer); EXAM = null; renderApp(); break;
+    case 'exam-exit': if (EXAM && EXAM.timer) clearInterval(EXAM.timer); EXAM = null; renderApp(); break;
+    // ---- 錯題本 ----
+    case 'wrong-redo': {
+      const qids = shuffle(Object.keys(WrongStore.all()).filter(x => QS.has(x)));
+      if (qids.length) WrongState.redo = { qids, idx: 0, answers: {} };
+      renderApp(); break;
+    }
+    case 'wrong-next': {
+      const r = WrongState.redo; if (!r) break;
+      const qid = r.qids[r.idx];
+      const sel = r.answers[qid];
+      if (sel) {
+        const q = QS.get(qid)!;
+        const ok = sel === q.correctAnswer;
+        QLogStore.record(qid, ok);
+        if (ok) { WrongStore.remove(qid); toast(t('redone_ok')); }
+        else { WrongStore.add(qid); toast(t('redone_stay'), 'error'); }
+      }
+      r.idx++; renderApp(); break;
+    }
+    case 'wrong-remove': WrongStore.remove(id); renderApp(); break;
+    case 'wrong-exit': WrongState.redo = null; renderApp(); break;
+    case 'wrong-clear': if (confirm(t('confirmClear'))) { lsSet(K.wrong, {}); renderApp(); } break;
+    case 'wrong-export-md': exportWrongMD(); break;
+    case 'wrong-export-pdf': exportWrongPDF(); break;
+    // ---- 統計過濾 ----
+    case 'stats-filter': StatsState.status = el.getAttribute('data-s') as any; renderApp(); break;
+  }
+});
+// 下拉/輸入變更事件委派
+document.addEventListener('change', (e: Event) => {
+  const el = e.target as HTMLElement;
+  if (el.id === 'kb-ch-select') { KBState.ch = (el as HTMLSelectElement).value; renderApp(); }
+  else if (el.id === 'fm-ch') { FMState.ch = (el as HTMLSelectElement).value; renderApp(); }
+  else if (el.id === 'fm-status') { FMState.status = (el as HTMLSelectElement).value as any; renderApp(); }
+  else if (el.id === 'fc-ch') { FCState.ch = (el as HTMLSelectElement).value; fcBuildDeck(); renderApp(); }
+  else if (el.id === 'fc-scope') { FCState.scope = (el as HTMLSelectElement).value as any; fcBuildDeck(); renderApp(); }
+  else if (el.id === 'fc-type') { FCState.type = (el as HTMLSelectElement).value as any; fcBuildDeck(); renderApp(); }
+  else if (el.id === 'graph-ch') { GraphState.ch = (el as HTMLSelectElement).value; renderApp(); }
+  else if (el.id === 'fm-kw') { /* 由 input 事件處理 */ }
+});
+/** 重渲染後恢復搜尋框焦點與光標位置 */
+function restoreCaret(id: string): void {
+  setTimeout(() => {
+    const inp = document.getElementById(id) as HTMLInputElement | null;
+    if (inp) { inp.focus(); const n2 = inp.value.length; try { inp.setSelectionRange(n2, n2); } catch (e) {} }
+  }, 0);
+}
+document.addEventListener('input', (e: Event) => {
+  const el = e.target as HTMLElement;
+  if (el.id === 'kb-kw') {
+    KBState.kw = (el as HTMLInputElement).value;
+    clearTimeout((window as any).__kbTimer);
+    (window as any).__kbTimer = setTimeout(() => { renderApp(); restoreCaret('kb-kw'); }, 220);
+  } else if (el.id === 'fm-kw') {
+    FMState.kw = (el as HTMLInputElement).value;
+    clearTimeout((window as any).__fmTimer);
+    (window as any).__fmTimer = setTimeout(() => { renderApp(); restoreCaret('fm-kw'); }, 250);
+  }
+});
+
+/** 掌握狀態按鈕按下後，局部刷新該組按鈕（不整頁重繪，保留滾動位置） */
+function refreshMasteryGroups(id: string): void {
+  document.querySelectorAll(`[data-mastery-group="${id}"]`).forEach(g => {
+    const tmp = document.createElement('div');
+    tmp.innerHTML = masteryButtons(id);
+    g.replaceWith(tmp.firstElementChild!);
+  });
+}
+
+/* ================= 啟動流程 ================= */
+async function boot(): Promise<void> {
+  applyTheme();
+  renderTopnav();
+  ACTIVE = currentHash();
+  // 依賴庫缺失檢查
+  if (typeof d3 === 'undefined') console.warn('D3 未載入：圖譜功能不可用');
+  // 1) 嘗試 fetch 同目錄 JSON（需 http/https 伺服器）
+  const ok = await tryFetchData();
+  // 2) 失敗則讀 LocalStorage 快取
+  if (!ok) { if (!loadFromCache()) showSetup(); }
+  renderApp();
+}
+boot();
+</script>
+
+<!-- 引導腳本：將上方 TypeScript 即時編譯為 JavaScript 並執行 -->
+<script>
+(function () {
+  try {
+    var srcEl = document.getElementById('ts-app');
+    var src = srcEl.textContent || '';
+    if (typeof ts === 'undefined') {
+      document.getElementById('app').innerHTML =
+        '<div class="p-10 text-center text-rose-600">TypeScript 編譯器 CDN 載入失敗，請檢查網路連線後重新整理。</div>';
+      return;
+    }
+    var js = ts.transpile(src, { target: ts.ScriptTarget.ES2020, removeComments: false });
+    (0, eval)(js);
+  } catch (err) {
+    console.error(err);
+    document.getElementById('app').innerHTML =
+      '<div class="p-10 text-center"><div class="text-rose-600 font-bold mb-2">應用初始化失敗 / Init error</div>' +
+      '<pre class="text-xs text-left bg-slate-100 dark:bg-slate-800 p-4 rounded overflow-auto max-w-2xl mx-auto">' +
+      String(err && err.stack || err).replace(/</g, '&lt;') + '</pre></div>';
+  }
+})();
+</script>
+</body>
+</html>
